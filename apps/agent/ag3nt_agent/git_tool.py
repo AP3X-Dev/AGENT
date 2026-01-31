@@ -735,3 +735,360 @@ class DiffFormatter:
 
         return f"{truncated}\n\n... ({remaining} more lines)\n\nSummary: {summary}"
 
+    def generate_commit_message(
+        self,
+        staged_files: list[str] | None = None,
+        llm: "BaseChatModel | None" = None,
+    ) -> str:
+        """Generate a conventional commit message from staged changes using LLM.
+
+        Uses the LLM to analyze staged changes and create a commit message
+        following the Conventional Commits format:
+        <type>(<scope>): <description>
+
+        Types: feat, fix, docs, refactor, test, chore, perf, style
+
+        Args:
+            staged_files: List of staged file paths (optional, for context)
+            llm: Language model for message generation (required)
+
+        Returns:
+            Generated commit message with Co-Authored-By footer
+
+        Raises:
+            ValueError: If llm is None or no staged changes exist
+        """
+        if llm is None:
+            raise ValueError("llm parameter is required for commit message generation")
+
+        # Get staged diff
+        diff_result = self.diff(staged=True)
+        if not diff_result.success or not diff_result.output or diff_result.output == "(no changes)":
+            raise ValueError("No staged changes to commit")
+
+        # Get recent commits for style reference
+        log_result = self.log(max_count=5, oneline=True)
+        recent_commits = log_result.output if log_result.success else ""
+
+        # Build prompt for LLM
+        prompt = f"""Generate a git commit message for the following staged changes.
+
+Follow the Conventional Commits format:
+<type>(<scope>): <description>
+
+**Types:**
+- feat: New feature
+- fix: Bug fix
+- docs: Documentation changes
+- refactor: Code restructuring without behavior change
+- test: Test additions/changes
+- chore: Maintenance tasks (dependencies, build, etc.)
+- perf: Performance improvements
+- style: Code style/formatting changes
+
+**Rules:**
+- Keep description under 72 characters
+- Use imperative mood ("Add feature" not "Added feature")
+- Focus on WHAT changed and WHY, not HOW
+- Be specific and concise
+- Scope is optional but helpful (e.g., "feat(auth): add login endpoint")
+
+**Recent commits for style reference:**
+{recent_commits}
+
+**Staged files:**
+{', '.join(staged_files) if staged_files else 'multiple files'}
+
+**Changes:**
+{diff_result.output[:3000]}
+
+Generate ONLY the commit message (first line only), nothing else. Do not include explanations."""
+
+        # Import here to avoid circular dependency
+        from langchain_core.messages import HumanMessage
+
+        # Generate commit message
+        response = llm.invoke([HumanMessage(content=prompt)])
+        message = response.content.strip()
+
+        # Clean up the message (remove quotes, extra whitespace)
+        message = message.strip('"\'')
+
+        # Ensure it's not too long
+        if len(message) > 100:
+            # Try to truncate at a word boundary
+            message = message[:97] + "..."
+
+        # Add Co-Authored-By footer
+        full_message = f"{message}\n\nCo-Authored-By: AG3NT Agent <noreply@ag3nt.dev>"
+
+        return full_message
+
+    def smart_commit(
+        self,
+        files: list[str] | None = None,
+        message: str | None = None,
+        auto_generate: bool = True,
+        llm: "BaseChatModel | None" = None,
+    ) -> GitResult:
+        """Intelligent commit with auto-generated message.
+
+        Stages files and commits with either a provided message or
+        an auto-generated conventional commit message.
+
+        Args:
+            files: Files to stage (None = stage all changes)
+            message: Manual commit message (overrides auto_generate)
+            auto_generate: Generate commit message automatically using LLM
+            llm: Language model for message generation (required if auto_generate=True)
+
+        Returns:
+            GitResult from the commit operation
+
+        Raises:
+            ValueError: If neither message provided nor auto_generate enabled with llm
+        """
+        # Stage files
+        if files:
+            for file in files:
+                result = self.add(file)
+                if not result.success:
+                    return result
+        else:
+            result = self.add(".")
+            if not result.success:
+                return result
+
+        # Determine commit message
+        if message:
+            commit_msg = message
+        elif auto_generate and llm:
+            try:
+                commit_msg = self.generate_commit_message(staged_files=files, llm=llm)
+            except ValueError as e:
+                return GitResult(
+                    operation="smart_commit",
+                    success=False,
+                    output="",
+                    error=str(e),
+                )
+        else:
+            return GitResult(
+                operation="smart_commit",
+                success=False,
+                output="",
+                error="Must provide message or enable auto_generate with llm",
+            )
+
+        # Commit
+        return self.commit(commit_msg)
+
+    def create_pull_request(
+        self,
+        title: str | None = None,
+        body: str | None = None,
+        base: str = "main",
+        draft: bool = False,
+        auto_generate: bool = True,
+        llm: "BaseChatModel | None" = None,
+    ) -> GitResult:
+        """Create a GitHub pull request using gh CLI.
+
+        Uses the GitHub CLI (gh) to create a pull request. Title and body
+        can be provided manually or auto-generated from commits.
+
+        **Prerequisites:**
+        - GitHub CLI (gh) installed and authenticated
+        - Remote repository on GitHub
+        - Current branch pushed to remote
+
+        Args:
+            title: PR title (auto-generated if None and auto_generate=True)
+            body: PR description (auto-generated if None and auto_generate=True)
+            base: Base branch to merge into (default: "main")
+            draft: Create as draft PR (default: False)
+            auto_generate: Auto-generate title and body from commits
+            llm: Language model for PR content generation
+
+        Returns:
+            GitResult with PR URL in output on success
+
+        Raises:
+            ValueError: If on base branch or gh CLI not available
+        """
+        # Check if gh CLI is available
+        try:
+            subprocess.run(
+                ["gh", "--version"],
+                capture_output=True,
+                timeout=5,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return GitResult(
+                operation="create_pull_request",
+                success=False,
+                output="",
+                error="GitHub CLI (gh) not found. Install from https://cli.github.com/",
+            )
+
+        # Get current branch
+        result = self._run(["rev-parse", "--abbrev-ref", "HEAD"])
+        current_branch = result.stdout.strip()
+
+        if current_branch == base:
+            return GitResult(
+                operation="create_pull_request",
+                success=False,
+                output="",
+                error=f"Cannot create PR: already on base branch '{base}'",
+            )
+
+        # Auto-generate title and body if needed
+        if (not title or not body) and auto_generate and llm:
+            # Get commits since divergence from base
+            log_result = self._run(
+                ["log", f"{base}..HEAD", "--pretty=format:%h %s"],
+                check=False,
+            )
+            commits = log_result.stdout
+
+            # Get diff summary
+            diff_result = self._run(
+                ["diff", f"{base}...HEAD", "--stat"],
+                check=False,
+            )
+            diff_summary = diff_result.stdout
+
+            # Generate PR content
+            pr_content = self._generate_pr_content(
+                commits=commits,
+                diff=diff_summary,
+                llm=llm,
+            )
+
+            title = title or pr_content["title"]
+            body = body or pr_content["body"]
+
+        # Push current branch to remote (with --set-upstream if needed)
+        push_result = self._run(
+            ["push", "-u", "origin", current_branch],
+            check=False,
+        )
+        if push_result.returncode != 0:
+            return GitResult(
+                operation="create_pull_request",
+                success=False,
+                output="",
+                error=f"Failed to push branch: {push_result.stderr}",
+            )
+
+        # Create PR using gh CLI
+        gh_args = [
+            "gh", "pr", "create",
+            "--title", title or "Update",
+            "--body", body or "Changes from AG3NT",
+            "--base", base,
+        ]
+
+        if draft:
+            gh_args.append("--draft")
+
+        try:
+            result = subprocess.run(
+                gh_args,
+                cwd=self.repo_path,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            if result.returncode == 0:
+                pr_url = result.stdout.strip()
+                return GitResult(
+                    operation="create_pull_request",
+                    success=True,
+                    output=pr_url,
+                )
+            else:
+                return GitResult(
+                    operation="create_pull_request",
+                    success=False,
+                    output="",
+                    error=result.stderr,
+                )
+        except subprocess.TimeoutExpired:
+            return GitResult(
+                operation="create_pull_request",
+                success=False,
+                output="",
+                error="PR creation timed out",
+            )
+
+    def _generate_pr_content(
+        self,
+        commits: str,
+        diff: str,
+        llm: "BaseChatModel",
+    ) -> dict[str, str]:
+        """Generate PR title and description from commits and diff.
+
+        Args:
+            commits: Commit history (one per line)
+            diff: Diff stat summary
+            llm: Language model for generation
+
+        Returns:
+            Dict with "title" and "body" keys
+        """
+        prompt = f"""Generate a GitHub pull request title and description for the following changes.
+
+**Commits:**
+{commits}
+
+**Diff summary:**
+{diff[:1000]}
+
+Generate:
+1. **Title** (max 72 chars) - Concise summary of changes
+2. **Description** - Detailed explanation with:
+   - ## Summary: What changed and why
+   - ## Changes: Bullet list of key changes
+   - ## Testing: How to test/verify changes
+
+Use markdown formatting for the description.
+
+Output format (exactly):
+TITLE: <title here>
+DESCRIPTION:
+<description here>
+"""
+
+        from langchain_core.messages import HumanMessage
+
+        response = llm.invoke([HumanMessage(content=prompt)])
+        content = response.content
+
+        # Parse response
+        lines = content.split('\n')
+        title = ""
+        description_lines = []
+        in_description = False
+
+        for line in lines:
+            if line.startswith("TITLE:"):
+                title = line.replace("TITLE:", "").strip()
+            elif line.startswith("DESCRIPTION:"):
+                in_description = True
+            elif in_description:
+                description_lines.append(line)
+
+        description = '\n'.join(description_lines).strip()
+
+        # Add footer
+        description += "\n\n---\n🤖 Generated by AG3NT"
+
+        return {
+            "title": title or "Update from AG3NT",
+            "body": description,
+        }
+

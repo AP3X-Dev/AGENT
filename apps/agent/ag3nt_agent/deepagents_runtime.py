@@ -98,6 +98,8 @@ from ag3nt_agent.context_summarization import (
     create_summarization_middleware,
     get_default_summarization_config,
 )
+from ag3nt_agent.interactive_tools import get_interactive_tools
+from ag3nt_agent.planning_middleware import PlanningMiddleware
 from ag3nt_agent.shell_middleware import ShellMiddleware
 from ag3nt_agent.skill_trigger_middleware import SkillTriggerMiddleware
 
@@ -230,25 +232,31 @@ def _format_tool_description(tool_call: dict, _state: Any = None, _runtime: Any 
 
 
 def _get_interrupt_on_config() -> dict[str, bool | dict]:
-    """Build interrupt_on configuration for risky tools.
+    """Build interrupt_on configuration for risky tools and interactive tools.
 
     Returns:
         Dict mapping tool names to interrupt configurations.
-        Empty dict if auto-approve is enabled.
+        Includes risky tools (if not auto-approved) and interactive tools (always).
     """
-    if _is_auto_approve_enabled():
-        logger.info("Auto-approve mode enabled - risky tools will run without approval")
-        return {}
-
-    # Configure interrupt for each risky tool
     config: dict[str, bool | dict] = {}
-    for tool_name in RISKY_TOOLS:
-        config[tool_name] = {
-            "allowed_decisions": ["approve", "reject"],
-            "description": _format_tool_description,
-        }
 
-    logger.info(f"Approval required for tools: {', '.join(RISKY_TOOLS)}")
+    # Add risky tools (if not auto-approved)
+    if not _is_auto_approve_enabled():
+        for tool_name in RISKY_TOOLS:
+            config[tool_name] = {
+                "allowed_decisions": ["approve", "reject"],
+                "description": _format_tool_description,
+            }
+        logger.info(f"Approval required for tools: {', '.join(RISKY_TOOLS)}")
+    else:
+        logger.info("Auto-approve mode enabled - risky tools will run without approval")
+
+    # Always add ask_user (interactive tool that always needs user input)
+    config["ask_user"] = {
+        "allowed_decisions": ["answer"],  # Special decision type for user questions
+        "description": lambda tool_call: f"Ask user: {tool_call.get('args', {}).get('question', 'N/A')}",
+    }
+
     return config
 
 
@@ -1028,7 +1036,10 @@ def _build_agent() -> CompiledStateGraph:
         logger.warning(f"Deep reasoning tool not available: {e}")
 
     # Combine custom AG3NT tools with MCP tools, memory tools, skill tools, browser tools, and reasoning tools
-    all_tools = [internet_search, fetch_url, schedule_reminder] + mcp_tools + memory_tools + skill_tools + browser_tools + reasoning_tools
+    # Get interactive tools (ask_user, etc.)
+    interactive_tools = get_interactive_tools()
+
+    all_tools = [internet_search, fetch_url, schedule_reminder] + mcp_tools + memory_tools + skill_tools + browser_tools + reasoning_tools + interactive_tools
     if node_action_tool:
         all_tools.append(node_action_tool)
     if mcp_tools:
@@ -1049,6 +1060,78 @@ Examples:
 - To read a skill: `/skills/example-skill/SKILL.md`
 
 **Never use Windows paths** like `C:\\Users\\...` - they are not supported.
+
+## File Editing
+
+For modifying existing files, you have two primary tools:
+
+**edit_file(path, old_str, new_str)** - Precise string replacement (PREFERRED for small changes)
+- Finds exact match of `old_str` and replaces with `new_str`
+- Preserves rest of file unchanged
+- Safer and more efficient than rewriting entire file
+- **IMPORTANT**: Match exact whitespace, indentation, and line breaks
+
+**write_file(path, content)** - Complete file rewrite
+- Replaces entire file contents
+- Use for new files or major restructuring
+
+### When to use edit_file ✅
+
+- Changing a single value: `TIMEOUT = 30` → `TIMEOUT = 60`
+- Renaming a function across its definition
+- Fixing a bug in a specific code block
+- Updating imports or configuration values
+- Modifying docstrings or comments
+- Any targeted change where you know exact context
+
+### When to use write_file ✅
+
+- Creating new files
+- Complete file restructuring or refactoring
+- Multiple scattered changes throughout file
+- Rewriting large sections with different logic
+
+### edit_file Best Practices
+
+**1. Include sufficient context**
+```python
+# ✅ Good - includes context for unique match
+edit_file(
+    path="/workspace/app.py",
+    old_str="""def calculate_total(items):
+    return sum(items)""",
+    new_str="""def calculate_total(items):
+    return sum(item.price for item in items)"""
+)
+
+# ❌ Bad - too vague, might match multiple places
+edit_file(
+    path="/workspace/app.py",
+    old_str="return sum(items)",
+    new_str="return sum(item.price for item in items)"
+)
+```
+
+**2. Match exact indentation and whitespace**
+```python
+# If file uses 4 spaces, use 4 spaces in old_str
+# If file uses tabs, use tabs in old_str
+# Line breaks must match exactly
+```
+
+**3. Read file first when unsure**
+```python
+# Always read to verify exact string format
+content = read_file("/workspace/config.py")
+# Then use exact snippet from read output
+edit_file(path="/workspace/config.py", old_str="...", new_str="...")
+```
+
+**4. For multiple edits to same file, use write_file**
+```python
+# ✅ If changing 3+ separate locations, just rewrite the file
+# ❌ Don't chain multiple edit_file calls on same file
+```
 
 ## Planning
 
@@ -1107,6 +1190,33 @@ Use these for:
 
 The browser runs headless (no visible window). Always close it when done to free resources.
 
+## Interactive Questions
+
+You can ask the user for clarification during execution using **ask_user**:
+
+```python
+answer = ask_user(
+    question="Which approach should I use?",
+    options=["Approach A", "Approach B"],
+    allow_custom=True  # Allow user to provide custom answer
+)
+```
+
+Use this when you need user input to proceed:
+- Choosing between multiple valid approaches
+- Confirming assumptions before taking action
+- Getting user preferences or requirements
+- Resolving ambiguity in the request
+- Obtaining information only the user knows
+
+**Best practices:**
+- Ask specific, clear questions
+- Provide options when there are clear choices
+- Only ask when truly necessary - don't over-ask
+- Explain why you need the information
+
+The execution will pause until the user responds.
+
 ## Security and Permissions
 
 Some tools require human approval before execution. These include:
@@ -1122,14 +1232,89 @@ Skills may also declare `required_permissions` in their YAML frontmatter. When u
 2. **Note sensitive actions**: When a skill requires sensitive permissions, acknowledge this
 3. **Proceed with care**: Be conservative with destructive actions
 
-Be concise and helpful."""
+Be concise and helpful.
+
+## Git Workflow Best Practices
+
+When working with Git:
+
+### Creating Commits
+
+1. **Review changes first:**
+   ```python
+   status = git_status()
+   diff = git_diff()  # See what will be committed
+   ```
+
+2. **Use smart_commit for auto-generated messages:**
+   ```python
+   # Automatically generates conventional commit message
+   result = git.smart_commit(
+       files=["src/auth.py", "tests/test_auth.py"],
+       auto_generate=True
+   )
+   ```
+
+3. **Conventional Commit Format:**
+   - `feat(scope): add new feature` - New functionality
+   - `fix(scope): resolve bug in module` - Bug fixes
+   - `docs: update README` - Documentation
+   - `refactor: restructure auth module` - Code restructuring
+   - `test: add unit tests for validation` - Tests
+   - `chore: update dependencies` - Maintenance
+
+4. **Commit message guidelines:**
+   - Keep first line under 72 characters
+   - Use imperative mood ("Add" not "Added")
+   - Be specific about WHAT and WHY
+   - Avoid vague messages like "update files" or "fix bug"
+
+### Creating Pull Requests
+
+Use `create_pull_request` to automate PR creation:
+
+```python
+# Auto-generated title and description from commits
+result = git.create_pull_request(
+    base="main",
+    auto_generate=True
+)
+# Returns PR URL
+```
+
+**Prerequisites:**
+- GitHub CLI (`gh`) must be installed
+- Branch must be pushed to remote
+- Repository must be on GitHub
+
+**Manual PR creation:**
+```python
+result = git.create_pull_request(
+    title="feat: Add user authentication system",
+    body='''## Summary
+Implements JWT-based authentication.
+
+## Changes
+- Added auth middleware
+- Created login/logout endpoints
+- Added token validation
+
+## Testing
+- Unit tests pass
+- Tested manually with Postman
+''',
+    base="main"
+)
+```"""
 
     # Build middleware list
     # Note: create_deep_agent already adds TodoListMiddleware internally
     # so we only add AG3NT-specific middleware here to avoid duplicates
+    planning_middleware = PlanningMiddleware()
     middleware_list = [
         shell_middleware,  # Shell execution capability
         SkillTriggerMiddleware(),  # Skill trigger matching
+        planning_middleware,  # Plan mode enforcement
     ]
 
     agent = create_deep_agent(
@@ -1165,7 +1350,9 @@ def _extract_interrupt_info(result: dict[str, Any]) -> dict[str, Any] | None:
         result: The result from agent.invoke()
 
     Returns:
-        Dict with interrupt details or None if no interrupt
+        Dict with interrupt details or None if no interrupt.
+        For tool approval: {"interrupt_id", "pending_actions", "action_count"}
+        For user question: {"interrupt_id", "type": "user_question", "question", "options", "allow_custom"}
     """
     if "__interrupt__" not in result:
         return None
@@ -1179,8 +1366,25 @@ def _extract_interrupt_info(result: dict[str, Any]) -> dict[str, Any] | None:
     interrupt_id = interrupt.id
     interrupt_value = interrupt.value
 
-    # Extract action requests and review configs
+    # Extract action requests
     action_requests = interrupt_value.get("action_requests", [])
+
+    # Check if this is a user question (ask_user tool)
+    if action_requests and len(action_requests) == 1:
+        action = action_requests[0]
+        if action.get("name") == "ask_user":
+            args = action.get("args", {})
+            logger.info(f"User question interrupt: {args.get('question')}")
+            return {
+                "interrupt_id": interrupt_id,
+                "type": "user_question",
+                "question": args.get("question", ""),
+                "options": args.get("options", []),
+                "allow_custom": args.get("allow_custom", True),
+            }
+
+    # Otherwise, handle as tool approval interrupt
+    # Extract action requests and review configs
     review_configs = interrupt_value.get("review_configs", [])
 
     # Format pending actions for display
