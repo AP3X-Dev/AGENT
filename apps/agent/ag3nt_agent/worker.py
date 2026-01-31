@@ -53,11 +53,28 @@ class UsageInfo(BaseModel):
 
 
 class InterruptInfo(BaseModel):
-    """Information about an interrupt requiring approval."""
+    """Information about an interrupt requiring approval or user input.
+
+    For tool approval interrupts:
+        - pending_actions: List of actions needing approval
+        - action_count: Number of actions
+
+    For user question interrupts:
+        - type: "user_question"
+        - question: The question to ask
+        - options: Optional list of choices
+        - allow_custom: Whether custom answers are allowed
+    """
 
     interrupt_id: str
-    pending_actions: list[dict]
-    action_count: int
+    # Tool approval fields (optional)
+    pending_actions: list[dict] | None = None
+    action_count: int | None = None
+    # User question fields (optional)
+    type: str | None = None
+    question: str | None = None
+    options: list[str] | None = None
+    allow_custom: bool | None = None
 
 
 class TurnResponse(BaseModel):
@@ -144,10 +161,15 @@ def turn(req: TurnRequest):
     # Build interrupt info if present
     interrupt = None
     if "interrupt" in result and result["interrupt"]:
+        interrupt_data = result["interrupt"]
         interrupt = InterruptInfo(
-            interrupt_id=result["interrupt"]["interrupt_id"],
-            pending_actions=result["interrupt"]["pending_actions"],
-            action_count=result["interrupt"]["action_count"],
+            interrupt_id=interrupt_data["interrupt_id"],
+            pending_actions=interrupt_data.get("pending_actions"),
+            action_count=interrupt_data.get("action_count"),
+            type=interrupt_data.get("type"),
+            question=interrupt_data.get("question"),
+            options=interrupt_data.get("options"),
+            allow_custom=interrupt_data.get("allow_custom"),
         )
 
     # Build usage info if present
@@ -182,10 +204,15 @@ def resume(req: ResumeRequest):
     # Build interrupt info if present
     interrupt = None
     if "interrupt" in result and result["interrupt"]:
+        interrupt_data = result["interrupt"]
         interrupt = InterruptInfo(
-            interrupt_id=result["interrupt"]["interrupt_id"],
-            pending_actions=result["interrupt"]["pending_actions"],
-            action_count=result["interrupt"]["action_count"],
+            interrupt_id=interrupt_data["interrupt_id"],
+            pending_actions=interrupt_data.get("pending_actions"),
+            action_count=interrupt_data.get("action_count"),
+            type=interrupt_data.get("type"),
+            question=interrupt_data.get("question"),
+            options=interrupt_data.get("options"),
+            allow_custom=interrupt_data.get("allow_custom"),
         )
 
     # Build usage info if present
