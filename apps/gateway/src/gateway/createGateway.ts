@@ -38,6 +38,7 @@ import { gatewayLogs } from "../logs/index.js";
 import { getUsageTracker, getErrorRegistry } from "../monitoring/index.js";
 import { MessageStore } from "../storage/MessageStore.js";
 import { createSessionRoutes } from "../routes/sessions.js";
+import { createSubagentRoutes } from "../routes/subagents.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -452,6 +453,10 @@ export async function createGateway(config: Config): Promise<Gateway> {
   // Mount session API routes (with message history support)
   const sessionRoutes = createSessionRoutes(sessionManager, messageStore);
   app.use("/api/sessions", sessionRoutes);
+
+  // Mount subagent API routes (proxied to Agent Worker)
+  const subagentRoutes = createSubagentRoutes(config);
+  app.use("/api/subagents", subagentRoutes);
 
   // Session management endpoints (legacy, kept for backward compatibility)
   app.get(`${config.gateway.httpPath}/sessions`, (_req, res) => {

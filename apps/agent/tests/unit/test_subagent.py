@@ -13,12 +13,14 @@ Also includes tests for:
 - Persistence: Save/load subagent runs to disk
 """
 
+import json
 import tempfile
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
+import yaml
 
 from ag3nt_agent.subagent_configs import (
     ANALYST,
@@ -245,6 +247,623 @@ class TestSubagentRegistry:
             "browser", "analyst", "writer", "memory",
         }
         assert set(types) == expected
+
+
+# =============================================================================
+# Dynamic SubagentRegistry Tests
+# =============================================================================
+
+
+class TestDynamicSubagentRegistry:
+    """Tests for the dynamic SubagentRegistry singleton class."""
+
+    @pytest.fixture(autouse=True)
+    def reset_registry(self):
+        """Reset the registry singleton before each test."""
+        from ag3nt_agent.subagent_registry import SubagentRegistry
+        SubagentRegistry.reset_instance()
+        yield
+        SubagentRegistry.reset_instance()
+
+    def test_singleton_pattern(self):
+        """Test that SubagentRegistry is a singleton."""
+        from ag3nt_agent.subagent_registry import SubagentRegistry
+
+        registry1 = SubagentRegistry.get_instance()
+        registry2 = SubagentRegistry.get_instance()
+        registry3 = SubagentRegistry()
+
+        assert registry1 is registry2
+        assert registry2 is registry3
+
+    def test_builtin_subagents_loaded(self):
+        """Test that builtin subagents are loaded on initialization."""
+        from ag3nt_agent.subagent_registry import SubagentRegistry
+
+        registry = SubagentRegistry.get_instance()
+
+        # All 8 builtin subagents should be loaded
+        builtins = registry.list_by_source("builtin")
+        assert len(builtins) == 8
+
+        builtin_names = {c.name.lower() for c in builtins}
+        assert builtin_names == {
+            "researcher", "coder", "reviewer", "planner",
+            "browser", "analyst", "writer", "memory",
+        }
+
+    def test_register_user_subagent(self):
+        """Test registering a user-defined subagent."""
+        from ag3nt_agent.subagent_registry import SubagentRegistry
+
+        registry = SubagentRegistry.get_instance()
+
+        custom = SubagentConfig(
+            name="DEBUGGER",
+            description="Debugging specialist",
+            system_prompt="You are a debugger.",
+            tools=["execute", "read_file"],
+            max_tokens=8000,
+        )
+
+        result = registry.register(custom, source="user")
+        assert result is True
+
+        # Should be retrievable
+        retrieved = registry.get("debugger")
+        assert retrieved is not None
+        assert retrieved.name == "DEBUGGER"
+        assert retrieved.description == "Debugging specialist"
+
+        # Source should be "user"
+        source = registry.get_source("debugger")
+        assert source == "user"
+
+    def test_register_duplicate_fails_without_overwrite(self):
+        """Test that registering a duplicate name fails without overwrite."""
+        from ag3nt_agent.subagent_registry import SubagentRegistry
+
+        registry = SubagentRegistry.get_instance()
+
+        custom1 = SubagentConfig(
+            name="CUSTOM",
+            description="First version",
+            system_prompt="First prompt",
+        )
+        custom2 = SubagentConfig(
+            name="CUSTOM",
+            description="Second version",
+            system_prompt="Second prompt",
+        )
+
+        assert registry.register(custom1, source="user") is True
+        assert registry.register(custom2, source="user") is False
+
+        # Should still have the first version
+        retrieved = registry.get("custom")
+        assert retrieved.description == "First version"
+
+    def test_register_with_overwrite(self):
+        """Test that overwrite=True allows replacement."""
+        from ag3nt_agent.subagent_registry import SubagentRegistry
+
+        registry = SubagentRegistry.get_instance()
+
+        custom1 = SubagentConfig(
+            name="CUSTOM",
+            description="First version",
+            system_prompt="First prompt",
+        )
+        custom2 = SubagentConfig(
+            name="CUSTOM",
+            description="Second version",
+            system_prompt="Second prompt",
+        )
+
+        assert registry.register(custom1, source="user") is True
+        assert registry.register(custom2, source="user", overwrite=True) is True
+
+        # Should have the second version
+        retrieved = registry.get("custom")
+        assert retrieved.description == "Second version"
+
+    def test_cannot_overwrite_builtin(self):
+        """Test that builtin subagents cannot be overwritten."""
+        from ag3nt_agent.subagent_registry import SubagentRegistry
+
+        registry = SubagentRegistry.get_instance()
+
+        fake_researcher = SubagentConfig(
+            name="researcher",
+            description="Fake researcher",
+            system_prompt="Fake prompt",
+        )
+
+        result = registry.register(fake_researcher, source="user", overwrite=True)
+        assert result is False
+
+        # Original should still be there
+        retrieved = registry.get("researcher")
+        assert "Fake" not in retrieved.description
+
+    def test_unregister_user_subagent(self):
+        """Test unregistering a user-defined subagent."""
+        from ag3nt_agent.subagent_registry import SubagentRegistry
+
+        registry = SubagentRegistry.get_instance()
+
+        custom = SubagentConfig(
+            name="TEMPORARY",
+            description="Temporary subagent",
+            system_prompt="Temp prompt",
+        )
+
+        registry.register(custom, source="user")
+        assert registry.get("temporary") is not None
+
+        result = registry.unregister("temporary")
+        assert result is True
+        assert registry.get("temporary") is None
+
+    def test_cannot_unregister_builtin(self):
+        """Test that builtin subagents cannot be unregistered."""
+        from ag3nt_agent.subagent_registry import SubagentRegistry
+
+        registry = SubagentRegistry.get_instance()
+
+        result = registry.unregister("researcher")
+        assert result is False
+
+        # Should still exist
+        assert registry.get("researcher") is not None
+
+    def test_unregister_nonexistent(self):
+        """Test unregistering a non-existent subagent."""
+        from ag3nt_agent.subagent_registry import SubagentRegistry
+
+        registry = SubagentRegistry.get_instance()
+
+        result = registry.unregister("nonexistent")
+        assert result is False
+
+    def test_get_with_source(self):
+        """Test get_with_source returns tuple of config and source."""
+        from ag3nt_agent.subagent_registry import SubagentRegistry
+
+        registry = SubagentRegistry.get_instance()
+
+        result = registry.get_with_source("researcher")
+        assert result is not None
+        config, source = result
+        assert config.name.lower() == "researcher"
+        assert source == "builtin"
+
+    def test_get_nonexistent(self):
+        """Test get returns None for nonexistent subagent."""
+        from ag3nt_agent.subagent_registry import SubagentRegistry
+
+        registry = SubagentRegistry.get_instance()
+
+        assert registry.get("nonexistent") is None
+        assert registry.get_with_source("nonexistent") is None
+        assert registry.get_source("nonexistent") is None
+
+    def test_list_all(self):
+        """Test listing all registered subagents."""
+        from ag3nt_agent.subagent_registry import SubagentRegistry
+
+        registry = SubagentRegistry.get_instance()
+
+        # Add a user subagent
+        custom = SubagentConfig(
+            name="CUSTOM",
+            description="Custom",
+            system_prompt="Custom prompt",
+        )
+        registry.register(custom, source="user")
+
+        all_subagents = registry.list_all()
+        assert len(all_subagents) == 9  # 8 builtin + 1 user
+
+    def test_list_by_source(self):
+        """Test listing subagents by source."""
+        from ag3nt_agent.subagent_registry import SubagentRegistry
+
+        registry = SubagentRegistry.get_instance()
+
+        # Add user subagents
+        for i in range(3):
+            custom = SubagentConfig(
+                name=f"USER_{i}",
+                description=f"User {i}",
+                system_prompt=f"Prompt {i}",
+            )
+            registry.register(custom, source="user")
+
+        # Add a plugin subagent
+        plugin = SubagentConfig(
+            name="PLUGIN_ONE",
+            description="Plugin one",
+            system_prompt="Plugin prompt",
+        )
+        registry.register(plugin, source="plugin")
+
+        builtins = registry.list_by_source("builtin")
+        users = registry.list_by_source("user")
+        plugins = registry.list_by_source("plugin")
+
+        assert len(builtins) == 8
+        assert len(users) == 3
+        assert len(plugins) == 1
+
+    def test_list_names(self):
+        """Test listing all subagent names."""
+        from ag3nt_agent.subagent_registry import SubagentRegistry
+
+        registry = SubagentRegistry.get_instance()
+
+        names = registry.list_names()
+        assert "researcher" in names
+        assert "coder" in names
+        assert len(names) == 8  # Only builtins initially
+
+    def test_on_change_callback(self):
+        """Test that on_change callbacks are invoked."""
+        from ag3nt_agent.subagent_registry import SubagentRegistry
+
+        registry = SubagentRegistry.get_instance()
+
+        events = []
+
+        def callback(event_type, name, source):
+            events.append((event_type, name, source))
+
+        registry.on_change(callback)
+
+        custom = SubagentConfig(
+            name="CALLBACK_TEST",
+            description="Test",
+            system_prompt="Test",
+        )
+
+        registry.register(custom, source="user")
+        assert len(events) == 1
+        assert events[0] == ("register", "callback_test", "user")
+
+        registry.unregister("callback_test")
+        assert len(events) == 2
+        assert events[1] == ("unregister", "callback_test", "user")
+
+    def test_remove_callback(self):
+        """Test removing a callback."""
+        from ag3nt_agent.subagent_registry import SubagentRegistry
+
+        registry = SubagentRegistry.get_instance()
+
+        events = []
+
+        def callback(event_type, name, source):
+            events.append((event_type, name, source))
+
+        registry.on_change(callback)
+
+        custom1 = SubagentConfig(
+            name="TEST1",
+            description="Test 1",
+            system_prompt="Test",
+        )
+        registry.register(custom1, source="user")
+        assert len(events) == 1
+
+        # Remove callback
+        result = registry.remove_callback(callback)
+        assert result is True
+
+        custom2 = SubagentConfig(
+            name="TEST2",
+            description="Test 2",
+            system_prompt="Test",
+        )
+        registry.register(custom2, source="user")
+        # Should still be 1 since callback was removed
+        assert len(events) == 1
+
+    def test_callback_error_handling(self):
+        """Test that callback errors don't break registry operations."""
+        from ag3nt_agent.subagent_registry import SubagentRegistry
+
+        registry = SubagentRegistry.get_instance()
+
+        good_events = []
+
+        def bad_callback(event_type, name, source):
+            raise RuntimeError("Callback error")
+
+        def good_callback(event_type, name, source):
+            good_events.append((event_type, name, source))
+
+        registry.on_change(bad_callback)
+        registry.on_change(good_callback)
+
+        custom = SubagentConfig(
+            name="ERROR_TEST",
+            description="Test",
+            system_prompt="Test",
+        )
+
+        # Should not raise despite bad_callback error
+        registry.register(custom, source="user")
+        assert len(good_events) == 1
+
+    def test_load_from_yaml_file(self):
+        """Test loading subagents from YAML file."""
+        from ag3nt_agent.subagent_registry import SubagentRegistry
+
+        registry = SubagentRegistry.get_instance()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            yaml_path = Path(tmpdir) / "subagents.yaml"
+            yaml_content = """
+subagents:
+  - name: YAML_TEST
+    description: Loaded from YAML
+    system_prompt: YAML prompt
+    tools:
+      - read_file
+    max_tokens: 4096
+    max_turns: 5
+"""
+            yaml_path.write_text(yaml_content)
+
+            loaded = registry.load_from_file(yaml_path, source="user")
+            assert loaded == 1
+
+            retrieved = registry.get("yaml_test")
+            assert retrieved is not None
+            assert retrieved.description == "Loaded from YAML"
+            assert "read_file" in retrieved.tools
+
+    def test_load_from_json_file(self):
+        """Test loading subagents from JSON file."""
+        from ag3nt_agent.subagent_registry import SubagentRegistry
+
+        registry = SubagentRegistry.get_instance()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            json_path = Path(tmpdir) / "subagents.json"
+            json_content = {
+                "subagents": [
+                    {
+                        "name": "JSON_TEST",
+                        "description": "Loaded from JSON",
+                        "system_prompt": "JSON prompt",
+                        "tools": ["write_file"],
+                        "max_tokens": 4096,
+                        "max_turns": 5,
+                    }
+                ]
+            }
+            json_path.write_text(json.dumps(json_content))
+
+            loaded = registry.load_from_file(json_path, source="plugin")
+            assert loaded == 1
+
+            retrieved = registry.get("json_test")
+            assert retrieved is not None
+            assert retrieved.description == "Loaded from JSON"
+            assert registry.get_source("json_test") == "plugin"
+
+    def test_load_from_nonexistent_file(self):
+        """Test loading from non-existent file returns 0."""
+        from ag3nt_agent.subagent_registry import SubagentRegistry
+
+        registry = SubagentRegistry.get_instance()
+
+        loaded = registry.load_from_file(Path("/nonexistent/path.yaml"))
+        assert loaded == 0
+
+    def test_save_to_file(self):
+        """Test saving subagents to file."""
+        from ag3nt_agent.subagent_registry import SubagentRegistry
+
+        registry = SubagentRegistry.get_instance()
+
+        # Add user subagents
+        for i in range(2):
+            custom = SubagentConfig(
+                name=f"SAVE_TEST_{i}",
+                description=f"Save test {i}",
+                system_prompt=f"Prompt {i}",
+            )
+            registry.register(custom, source="user")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            save_path = Path(tmpdir) / "saved.yaml"
+
+            saved = registry.save_to_file(save_path, source="user")
+            assert saved == 2
+            assert save_path.exists()
+
+            # Verify content
+            content = yaml.safe_load(save_path.read_text())
+            assert len(content["subagents"]) == 2
+
+    def test_save_single_config(self):
+        """Test saving a single subagent config."""
+        from ag3nt_agent.subagent_registry import SubagentRegistry
+
+        registry = SubagentRegistry.get_instance()
+
+        custom = SubagentConfig(
+            name="SINGLE_SAVE",
+            description="Single save test",
+            system_prompt="Single prompt",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            user_data_path = Path(tmpdir)
+
+            result = registry.save_single_config(custom, user_data_path)
+            assert result is True
+
+            # Check file was created
+            expected_path = user_data_path / "subagents" / "single_save.yaml"
+            assert expected_path.exists()
+
+    def test_load_user_configs(self):
+        """Test loading user configs from ~/.ag3nt/subagents/."""
+        from ag3nt_agent.subagent_registry import SubagentRegistry
+
+        registry = SubagentRegistry.get_instance()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            user_data_path = Path(tmpdir)
+            subagents_dir = user_data_path / "subagents"
+            subagents_dir.mkdir()
+
+            # Create a YAML file
+            yaml_content = """
+subagents:
+  - name: USER_LOAD_1
+    description: User load 1
+    system_prompt: Prompt 1
+"""
+            (subagents_dir / "user1.yaml").write_text(yaml_content)
+
+            # Create a JSON file
+            json_content = {"subagents": [
+                {"name": "USER_LOAD_2", "description": "User load 2", "system_prompt": "Prompt 2"}
+            ]}
+            (subagents_dir / "user2.json").write_text(json.dumps(json_content))
+
+            loaded = registry.load_user_configs(user_data_path)
+            assert loaded == 2
+
+            assert registry.get("user_load_1") is not None
+            assert registry.get("user_load_2") is not None
+
+    def test_load_user_configs_creates_directory(self):
+        """Test that load_user_configs creates directory if missing."""
+        from ag3nt_agent.subagent_registry import SubagentRegistry
+
+        registry = SubagentRegistry.get_instance()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            user_data_path = Path(tmpdir) / "newdir"
+
+            loaded = registry.load_user_configs(user_data_path)
+            assert loaded == 0
+
+            # Directory should be created
+            assert (user_data_path / "subagents").exists()
+
+    def test_to_dict(self):
+        """Test exporting registry as dictionary."""
+        from ag3nt_agent.subagent_registry import SubagentRegistry
+
+        registry = SubagentRegistry.get_instance()
+
+        custom = SubagentConfig(
+            name="DICT_TEST",
+            description="Dict test",
+            system_prompt="Dict prompt",
+        )
+        registry.register(custom, source="user")
+
+        result = registry.to_dict()
+
+        assert "researcher" in result
+        assert result["researcher"]["source"] == "builtin"
+
+        assert "dict_test" in result
+        assert result["dict_test"]["source"] == "user"
+        assert result["dict_test"]["config"]["name"] == "DICT_TEST"
+
+    def test_case_insensitive_lookup(self):
+        """Test that subagent lookup is case-insensitive."""
+        from ag3nt_agent.subagent_registry import SubagentRegistry
+
+        registry = SubagentRegistry.get_instance()
+
+        custom = SubagentConfig(
+            name="MiXeD_CaSe",
+            description="Mixed case test",
+            system_prompt="Mixed prompt",
+        )
+        registry.register(custom, source="user")
+
+        # All these should work
+        assert registry.get("mixed_case") is not None
+        assert registry.get("MIXED_CASE") is not None
+        assert registry.get("MiXeD_CaSe") is not None
+
+    def test_thread_safety(self):
+        """Test that registry operations are thread-safe."""
+        import concurrent.futures
+        from ag3nt_agent.subagent_registry import SubagentRegistry
+
+        registry = SubagentRegistry.get_instance()
+
+        results = []
+
+        def register_subagent(index):
+            config = SubagentConfig(
+                name=f"THREAD_{index}",
+                description=f"Thread {index}",
+                system_prompt=f"Prompt {index}",
+            )
+            success = registry.register(config, source="user")
+            results.append((index, success))
+            return success
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            futures = [executor.submit(register_subagent, i) for i in range(20)]
+            concurrent.futures.wait(futures)
+
+        # All registrations should succeed (unique names)
+        assert len([r for r in results if r[1]]) == 20
+
+        # All should be retrievable
+        for i in range(20):
+            assert registry.get(f"thread_{i}") is not None
+
+
+class TestBackwardCompatibilityFunctions:
+    """Tests for backward compatibility functions in subagent_registry."""
+
+    @pytest.fixture(autouse=True)
+    def reset_registry(self):
+        """Reset the registry singleton before each test."""
+        from ag3nt_agent.subagent_registry import SubagentRegistry
+        SubagentRegistry.reset_instance()
+        yield
+        SubagentRegistry.reset_instance()
+
+    def test_get_subagent_config_function(self):
+        """Test the get_subagent_config convenience function."""
+        from ag3nt_agent.subagent_registry import get_subagent_config
+
+        config = get_subagent_config("researcher")
+        assert config.name.lower() == "researcher"
+
+    def test_get_subagent_config_raises_on_unknown(self):
+        """Test that get_subagent_config raises ValueError for unknown types."""
+        from ag3nt_agent.subagent_registry import get_subagent_config
+
+        with pytest.raises(ValueError) as exc_info:
+            get_subagent_config("unknown_type")
+
+        assert "Unknown subagent: unknown_type" in str(exc_info.value)
+        assert "Available:" in str(exc_info.value)
+
+    def test_list_subagent_types_function(self):
+        """Test the list_subagent_types convenience function."""
+        from ag3nt_agent.subagent_registry import list_subagent_types
+
+        types = list_subagent_types()
+        assert "researcher" in types
+        assert "coder" in types
+        assert len(types) == 8
 
 
 # =============================================================================

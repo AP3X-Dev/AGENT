@@ -220,6 +220,8 @@ document.querySelectorAll('.nav-btn').forEach(btn => {
       loadNodes();
       loadApprovedNodes();
       loadPairingCode();
+    } else if (btn.dataset.tab === 'subagents') {
+      loadSubagents();
     }
   });
 });
@@ -1473,10 +1475,232 @@ document.getElementById('refresh-nodes')?.addEventListener('click', () => {
   loadPairingCode();
 });
 
+// ==================== SUBAGENTS TAB ====================
+
+let allSubagents = [];
+
+async function loadSubagents() {
+  const subagentsList = document.getElementById('subagents-list');
+  try {
+    const data = await api('/subagents');
+    if (data.subagents) {
+      allSubagents = data.subagents;
+      renderSubagents(data.subagents);
+    }
+  } catch (err) {
+    subagentsList.innerHTML = '<div class="error">Failed to load subagents</div>';
+    console.error('Failed to load subagents:', err);
+  }
+}
+
+function renderSubagents(subagents) {
+  const subagentsList = document.getElementById('subagents-list');
+
+  if (!subagents || subagents.length === 0) {
+    subagentsList.innerHTML = '<div class="subagents-empty">No subagents registered</div>';
+    return;
+  }
+
+  const html = subagents.map(s => `
+    <div class="subagent-card" data-name="${s.name}" data-source="${s.source}">
+      <div class="subagent-header">
+        <h3 class="subagent-name">${s.name}</h3>
+        <span class="subagent-source source-${s.source}">${s.source}</span>
+      </div>
+      <p class="subagent-description">${s.description}</p>
+      <div class="subagent-meta">
+        <span class="subagent-tools">${s.tools?.length || 0} tools</span>
+        <span class="subagent-tokens">${s.max_tokens} tokens</span>
+      </div>
+      ${s.source === 'user' ? `<button class="btn btn-sm btn-danger subagent-delete" data-name="${s.name}">Delete</button>` : ''}
+    </div>
+  `).join('');
+
+  subagentsList.innerHTML = html;
+
+  // Add click handlers for viewing details
+  subagentsList.querySelectorAll('.subagent-card').forEach(card => {
+    card.addEventListener('click', (e) => {
+      if (!e.target.classList.contains('subagent-delete')) {
+        openSubagentModal(card.dataset.name);
+      }
+    });
+  });
+
+  // Add delete handlers
+  subagentsList.querySelectorAll('.subagent-delete').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (confirm(`Delete subagent "${btn.dataset.name}"?`)) {
+        await deleteSubagent(btn.dataset.name);
+      }
+    });
+  });
+}
+
+async function openSubagentModal(name) {
+  const modal = document.getElementById('subagent-modal');
+  const title = document.getElementById('subagent-modal-title');
+  const body = document.getElementById('subagent-modal-body');
+
+  try {
+    const data = await api(`/subagents/${encodeURIComponent(name)}`);
+    if (!data.ok) {
+      body.innerHTML = '<div class="error">Failed to load subagent details</div>';
+      return;
+    }
+
+    title.textContent = data.name;
+    body.innerHTML = `
+      <div class="subagent-detail">
+        <div class="detail-row">
+          <label>Source:</label>
+          <span class="source-${data.source}">${data.source}</span>
+        </div>
+        <div class="detail-row">
+          <label>Description:</label>
+          <p>${data.description}</p>
+        </div>
+        <div class="detail-row">
+          <label>Tools:</label>
+          <p>${data.tools?.join(', ') || 'None'}</p>
+        </div>
+        <div class="detail-row">
+          <label>Max Tokens:</label>
+          <span>${data.max_tokens}</span>
+        </div>
+        <div class="detail-row">
+          <label>Max Turns:</label>
+          <span>${data.max_turns}</span>
+        </div>
+        <div class="detail-row">
+          <label>Thinking Mode:</label>
+          <span>${data.thinking_mode}</span>
+        </div>
+        <div class="detail-row">
+          <label>System Prompt:</label>
+          <pre class="system-prompt">${data.system_prompt}</pre>
+        </div>
+      </div>
+    `;
+    modal.classList.add('active');
+  } catch (err) {
+    console.error('Failed to load subagent:', err);
+  }
+}
+
+function openCreateSubagentModal() {
+  const modal = document.getElementById('subagent-modal');
+  const title = document.getElementById('subagent-modal-title');
+  const body = document.getElementById('subagent-modal-body');
+
+  title.textContent = 'Create New Subagent';
+  body.innerHTML = `
+    <form id="create-subagent-form" class="subagent-form">
+      <div class="form-group">
+        <label for="subagent-name">Name *</label>
+        <input type="text" id="subagent-name" required placeholder="e.g., DEBUGGER">
+      </div>
+      <div class="form-group">
+        <label for="subagent-desc">Description *</label>
+        <input type="text" id="subagent-desc" required placeholder="Brief description of what this subagent does">
+      </div>
+      <div class="form-group">
+        <label for="subagent-prompt">System Prompt *</label>
+        <textarea id="subagent-prompt" rows="6" required placeholder="You are a specialized..."></textarea>
+      </div>
+      <div class="form-group">
+        <label for="subagent-tools">Tools (comma-separated)</label>
+        <input type="text" id="subagent-tools" placeholder="fetch_url, execute">
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label for="subagent-max-tokens">Max Tokens</label>
+          <input type="number" id="subagent-max-tokens" value="8000">
+        </div>
+        <div class="form-group">
+          <label for="subagent-max-turns">Max Turns</label>
+          <input type="number" id="subagent-max-turns" value="3">
+        </div>
+      </div>
+      <div class="form-actions">
+        <button type="button" class="btn" onclick="closeSubagentModal()">Cancel</button>
+        <button type="submit" class="btn btn-primary">Create</button>
+      </div>
+    </form>
+  `;
+
+  document.getElementById('create-subagent-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    await createSubagent();
+  });
+
+  modal.classList.add('active');
+}
+
+async function createSubagent() {
+  const name = document.getElementById('subagent-name').value.trim();
+  const description = document.getElementById('subagent-desc').value.trim();
+  const systemPrompt = document.getElementById('subagent-prompt').value.trim();
+  const toolsStr = document.getElementById('subagent-tools').value.trim();
+  const maxTokens = parseInt(document.getElementById('subagent-max-tokens').value) || 8000;
+  const maxTurns = parseInt(document.getElementById('subagent-max-turns').value) || 3;
+
+  const tools = toolsStr ? toolsStr.split(',').map(t => t.trim()).filter(t => t) : [];
+
+  try {
+    const result = await api('/subagents', {
+      method: 'POST',
+      body: {
+        name,
+        description,
+        system_prompt: systemPrompt,
+        tools,
+        max_tokens: maxTokens,
+        max_turns: maxTurns,
+      }
+    });
+
+    if (result.ok !== false) {
+      showToast(`Subagent "${name}" created successfully`, 'success', { timeout: 3000 });
+      closeSubagentModal();
+      loadSubagents();
+    } else {
+      showToast(result.error || 'Failed to create subagent', 'error');
+    }
+  } catch (err) {
+    showToast('Failed to create subagent: ' + err.message, 'error');
+  }
+}
+
+async function deleteSubagent(name) {
+  try {
+    const result = await api(`/subagents/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    if (result.ok !== false) {
+      showToast(`Subagent "${name}" deleted`, 'success', { timeout: 3000 });
+      loadSubagents();
+    } else {
+      showToast(result.error || 'Failed to delete subagent', 'error');
+    }
+  } catch (err) {
+    showToast('Failed to delete subagent: ' + err.message, 'error');
+  }
+}
+
+function closeSubagentModal() {
+  document.getElementById('subagent-modal').classList.remove('active');
+}
+
+// Subagents tab event listeners
+document.getElementById('refresh-subagents')?.addEventListener('click', loadSubagents);
+document.getElementById('add-subagent')?.addEventListener('click', openCreateSubagentModal);
+document.getElementById('subagent-modal-close')?.addEventListener('click', closeSubagentModal);
+
 // Initialize
 connectWS();
 loadDashboard();
 loadSkills();
+loadSubagents();
 loadWorkspace();
 loadSessions();
 loadMemoryFiles();
