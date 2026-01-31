@@ -1,0 +1,67 @@
+# AG3NT default config
+
+gateway:
+  host: 127.0.0.1
+  port: 18789
+  wsPath: /ws
+  httpPath: /api
+
+models:
+  # Supported providers: anthropic, openai, openrouter, kimi, google
+  provider: openrouter
+  # Model name varies by provider:
+  # - anthropic: claude-sonnet-4-5-20250929, claude-3-opus-20240229
+  # - openai: gpt-4o, gpt-4-turbo
+  # - openrouter: anthropic/claude-3.5-sonnet, openai/gpt-4o
+  # - kimi: moonshot-v1-128k, moonshot-v1-32k, kimi-latest
+  # - google: gemini-pro
+  model: moonshotai/kimi-k2-thinking
+
+security:
+  # DM policy: "open" (all contacts) or "pairing" (require pairing code)
+  defaultDMPolicy: pairing
+  # Auto-approve risky tools (not recommended for production)
+  autoApprove: false
+  # Tools that ALWAYS require approval, even in auto-approve mode
+  alwaysRequireApproval:
+    - execute
+    - delete_file
+    - send_message
+  # Tools exempt from approval (empty = follow normal rules)
+  noApprovalRequired: []
+  # Timeout for approval requests in seconds (0 = no timeout)
+  approvalTimeoutSeconds: 0
+  # Pre-approved session patterns (e.g., 'telegram:*:12345')
+  allowlist: []
+
+channels:
+  enabled: []
+
+skills:
+  bundledPath: ./skills
+  globalPath: ~/.ag3nt/skills
+
+storage:
+  root: ~/.ag3nt/data
+  dbPath: ~/.ag3nt/data/db/ag3nt.sqlite
+
+scheduler:
+  # Heartbeat interval in minutes (0 = disabled, 30 = every 30 min)
+  heartbeatMinutes: 0
+  # Cron job definitions
+  # Example:
+  # cron:
+  #   - schedule: "0 9 * * *"      # 9 AM daily
+  #     message: "DAILY_BRIEFING"
+  #     sessionMode: main
+  #     name: "Morning Briefing"
+  #   - schedule: "0 17 * * 5"     # 5 PM on Fridays
+  #     message: "Weekly summary please"
+  #     sessionMode: isolated
+  #     name: "Weekly Summary"
+  cron: []
+
+nodes:
+  # Companion nodes (remote devices) - empty by default
+  companions: []
+  # Local node capabilities are auto-detected

@@ -1,0 +1,72 @@
+# Dependabot configuration for AG3NT
+# Automatically creates PRs for dependency updates
+
+version: 2
+
+updates:
+  # Gateway (Node.js/TypeScript)
+  - package-ecosystem: "npm"
+    directory: "/apps/gateway"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "America/New_York"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps(gateway)"
+    labels:
+      - "dependencies"
+      - "gateway"
+    groups:
+      typescript:
+        patterns:
+          - "typescript"
+          - "@types/*"
+      testing:
+        patterns:
+          - "vitest"
+          - "@vitest/*"
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Agent (Python)
+  - package-ecosystem: "pip"
+    directory: "/apps/agent"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "America/New_York"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps(agent)"
+    labels:
+      - "dependencies"
+      - "agent"
+    groups:
+      testing:
+        patterns:
+          - "pytest*"
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "America/New_York"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "ci"
+    labels:
+      - "dependencies"
+      - "ci"
+

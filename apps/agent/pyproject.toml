@@ -1,0 +1,85 @@
+[project]
+name = "ag3nt-agent"
+version = "0.0.1"
+description = "AG3NT agent worker"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi>=0.115.0",
+  "uvicorn>=0.30.6",
+  "pydantic>=2.9.2"
+]
+
+[tool.uvicorn]
+factory = false
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8.3.0",
+  "pytest-cov>=6.0.0",
+  "pytest-asyncio>=0.25.0",
+  "pytest-mock>=3.14.0",
+  "pytest-timeout>=2.3.1",
+  "httpx>=0.27.0",  # For testing FastAPI endpoints
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+timeout = 30
+markers = [
+  "unit: Unit tests (fast, no I/O)",
+  "integration: Integration tests (may use I/O)",
+  "e2e: End-to-end tests (full system)",
+  "slow: Tests that take more than 1 second",
+]
+filterwarnings = [
+  "ignore::DeprecationWarning",
+  "ignore::PendingDeprecationWarning",
+]
+addopts = [
+  "-v",
+  "--strict-markers",
+  "--tb=short",
+  "--cov=ag3nt_agent",
+  "--cov-report=term-missing",
+  "--cov-report=html",
+  "--cov-report=xml",
+]
+
+[tool.coverage.run]
+source = ["ag3nt_agent"]
+branch = true
+omit = [
+  "*/tests/*",
+  "*/test_*.py",
+  "*/__pycache__/*",
+  "*/venv/*",
+  "*/virtualenv/*",
+  "*/.venv/*",
+]
+
+[tool.coverage.report]
+precision = 2
+show_missing = true
+skip_covered = false
+fail_under = 55
+exclude_lines = [
+  "pragma: no cover",
+  "def __repr__",
+  "raise AssertionError",
+  "raise NotImplementedError",
+  "if __name__ == .__main__.:",
+  "if TYPE_CHECKING:",
+  "@abstractmethod",
+  "@overload",
+]
+
+[tool.coverage.html]
+directory = "htmlcov"
+
+[tool.coverage.xml]
+output = "coverage.xml"

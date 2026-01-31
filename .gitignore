@@ -1,0 +1,68 @@
+# Node
+node_modules/
+dist/
+*.log
+.pnpm-store/
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+*.egg
+
+# Environment variables - NEVER COMMIT THESE
+.env
+.env.local
+.env.*.local
+*.env
+
+# API Keys and Secrets - extra protection
+**/secrets.json
+**/credentials.json
+**/*secret*
+**/*credential*
+
+# Local runtime
+.ag3nt/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+build/
+*.tsbuildinfo
+
+# Test coverage
+coverage/
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Documentation (temporary - remove when ready to publish)
+/docs/
+
+# Memory and cache
+*.faiss
+*.pkl
+*.cache
+
+# Logs
+logs/
+*.log
+*_stdout.txt
+*_stderr.txt
+
+# Temporary documentation files
+Comprehensive_Documentation_*.md

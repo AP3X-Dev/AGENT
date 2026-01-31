@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AG3NT Control Panel</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app">
+    <header class="header">
+      <div class="logo">
+        <span class="logo-text">AP3</span><span class="logo-x">X</span>
+        <span class="logo-subtitle">Control Panel</span>
+      </div>
+      <div class="header-actions">
+        <button class="btn btn-accent" id="launch-tui">Launch TUI</button>
+        <div class="status-indicator">
+          <span class="status-dot"></span>
+          <span class="status-text">Connecting...</span>
+        </div>
+      </div>
+    </header>
+
+    <nav class="nav">
+      <button class="nav-btn active" data-tab="dashboard">Dashboard</button>
+      <button class="nav-btn" data-tab="chat">Chat</button>
+      <button class="nav-btn" data-tab="workspace">Workspace</button>
+      <button class="nav-btn" data-tab="sessions">Sessions</button>
+      <button class="nav-btn" data-tab="memory">Memory</button>
+      <button class="nav-btn" data-tab="skills">Skills</button>
+      <button class="nav-btn" data-tab="nodes">Nodes</button>
+      <button class="nav-btn" data-tab="logs">Debug Logs</button>
+    </nav>
+
+    <main class="content">
+      <!-- Dashboard Tab -->
+      <section class="tab-content active" id="dashboard">
+        <!-- Hero Section -->
+        <div class="dash-hero">
+          <!-- System Overview Card -->
+          <div class="dash-overview">
+            <div class="dash-overview-status">
+              <div class="dash-status-indicator" id="system-health-indicator">
+                <span class="dash-status-icon">✓</span>
+              </div>
+              <div class="dash-status-text">
+                <h2 id="system-health-text">All Systems Operational</h2>
+                <p id="system-health-sub">Gateway connected • Agent online</p>
+              </div>
+            </div>
+            <div class="dash-overview-stats">
+              <div class="dash-stat">
+                <span class="dash-stat-value" id="agent-status">—</span>
+                <span class="dash-stat-label">Status</span>
+              </div>
+              <div class="dash-stat">
+                <span class="dash-stat-value" id="session-count">0</span>
+                <span class="dash-stat-label">Sessions</span>
+              </div>
+              <div class="dash-stat">
+                <span class="dash-stat-value" id="job-count">0</span>
+                <span class="dash-stat-label">Jobs</span>
+              </div>
+              <div class="dash-stat">
+                <span class="dash-stat-value" id="heartbeat-status">—</span>
+                <span class="dash-stat-label">Heartbeat</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Quick Actions -->
+          <div class="dash-quick-actions">
+            <h3>Quick Actions</h3>
+            <button class="dash-action-btn" id="quick-new-chat" title="Start a new chat">
+              <span class="dash-action-icon">💬</span>
+              <span>New Chat</span>
+            </button>
+            <button class="dash-action-btn" id="quick-view-logs" title="View debug logs">
+              <span class="dash-action-icon">📋</span>
+              <span>View Logs</span>
+            </button>
+            <button class="dash-action-btn" id="trigger-heartbeat" title="Trigger heartbeat">
+              <span class="dash-action-icon">⟳</span>
+              <span>Heartbeat</span>
+            </button>
+            <button class="dash-action-btn" id="quick-restart" title="Restart agent">
+              <span class="dash-action-icon">🔄</span>
+              <span>Restart</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Activity Feed -->
+        <div class="dash-activity">
+          <div class="dash-activity-header">
+            <h3>Recent Activity</h3>
+            <button class="btn btn-sm btn-ghost" id="clear-activity">Clear</button>
+          </div>
+          <div class="dash-activity-feed" id="activity-feed">
+            <div class="dash-activity-empty">No recent activity</div>
+          </div>
+        </div>
+
+        <!-- Configuration Row -->
+        <div class="dash-config-row">
+          <!-- Model Configuration -->
+          <div class="dash-config-card">
+            <div class="dash-config-header">
+              <h4>Model Configuration</h4>
+              <span class="dash-config-badge" id="model-current">—</span>
+            </div>
+            <div class="dash-config-body">
+              <div class="dash-config-field">
+                <label for="model-provider">Provider</label>
+                <select id="model-provider">
+                  <option value="">Loading...</option>
+                </select>
+              </div>
+              <div class="dash-config-field">
+                <label for="model-name">Model</label>
+                <select id="model-name">
+                  <option value="">Select provider first</option>
+                </select>
+              </div>
+              <button class="btn btn-sm" id="save-model">Save</button>
+            </div>
+          </div>
+
+          <!-- Agent Control -->
+          <div class="dash-config-card">
+            <div class="dash-config-header">
+              <h4>Agent Worker</h4>
+              <span class="dash-config-badge" id="agent-worker-status">Checking...</span>
+            </div>
+            <div class="dash-config-body">
+              <div class="dash-config-actions">
+                <button class="btn btn-sm" id="restart-agent">Restart</button>
+                <button class="btn btn-sm btn-ghost" id="check-agent">Check Status</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- System Info -->
+          <div class="dash-config-card">
+            <div class="dash-config-header">
+              <h4>System Info</h4>
+            </div>
+            <div class="dash-config-body dash-system-info">
+              <div class="dash-info-row">
+                <span>Nodes</span>
+                <span id="nodes-list">—</span>
+              </div>
+              <div class="dash-info-row">
+                <span>Channels</span>
+                <span id="channels-list">—</span>
+              </div>
+              <div class="dash-info-row">
+                <span>Scheduler</span>
+                <span id="scheduler-info">—</span>
+              </div>
+              <div class="dash-config-actions" style="margin-top: 0.5rem;">
+                <button class="btn btn-sm btn-ghost" id="pause-heartbeat">Pause</button>
+                <button class="btn btn-sm btn-ghost" id="resume-heartbeat">Resume</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Chat Tab -->
+      <section class="tab-content" id="chat">
+        <div class="chat-container">
+          <div class="chat-toolbar">
+            <span class="chat-title">Chat</span>
+            <div class="chat-actions">
+              <button class="btn btn-sm" id="clear-chat" title="Clear chat">Clear</button>
+              <select id="export-format" class="export-select">
+                <option value="markdown">Markdown</option>
+                <option value="json">JSON</option>
+              </select>
+              <button class="btn btn-sm" id="export-chat" title="Export chat">↓ Export</button>
+            </div>
+          </div>
+          <div class="chat-messages" id="chat-messages"></div>
+          <div class="chat-input-area">
+            <input type="text" id="chat-input" placeholder="Send a message to the agent..." />
+            <button class="btn" id="send-btn">Send</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Workspace Tab -->
+      <section class="tab-content" id="workspace">
+        <div class="workspace-container">
+          <div class="workspace-sidebar">
+            <div class="workspace-header">
+              <h3>Files</h3>
+              <button class="btn btn-sm" id="refresh-workspace" title="Refresh">↻</button>
+            </div>
+            <div class="file-tree" id="file-tree">Loading...</div>
+          </div>
+          <div class="workspace-preview">
+            <div class="preview-header">
+              <span id="preview-filename">Select a file</span>
+              <button class="btn btn-sm" id="download-file" style="display:none">Download</button>
+            </div>
+            <pre class="preview-content" id="preview-content">Select a file from the tree to preview its contents.</pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Sessions Tab -->
+      <section class="tab-content" id="sessions">
+        <div class="sessions-header">
+          <h2>Active Sessions</h2>
+          <div class="sessions-actions">
+            <button class="btn btn-sm" id="refresh-sessions">↻ Refresh</button>
+            <button class="btn btn-sm btn-danger" id="clear-sessions">Clear All</button>
+          </div>
+        </div>
+        <div class="sessions-table-container">
+          <table class="sessions-table">
+            <thead>
+              <tr>
+                <th>Session ID</th>
+                <th>Channel</th>
+                <th>User</th>
+                <th>Status</th>
+                <th>Created</th>
+                <th>Last Activity</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="sessions-list">
+              <tr><td colspan="7" class="loading">Loading sessions...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Memory Tab -->
+      <section class="tab-content" id="memory">
+        <div class="memory-container">
+          <div class="memory-sidebar">
+            <div class="memory-header">
+              <h3>Memory Files</h3>
+              <button class="btn btn-sm" id="refresh-memory" title="Refresh">↻</button>
+            </div>
+            <div class="memory-files" id="memory-files">Loading...</div>
+          </div>
+          <div class="memory-editor">
+            <div class="editor-header">
+              <span id="memory-filename">Select a file</span>
+              <div class="editor-actions">
+                <button class="btn btn-sm" id="save-memory" style="display:none">Save</button>
+              </div>
+            </div>
+            <textarea class="editor-content" id="memory-content" placeholder="Select a file from the list to edit"></textarea>
+          </div>
+        </div>
+      </section>
+
+      <!-- Skills Tab -->
+      <section class="tab-content" id="skills">
+        <!-- Skills Header with Search and Filters -->
+        <div class="skills-header">
+          <div class="skills-search">
+            <input type="text" id="skills-search" placeholder="Search skills..." class="search-input">
+          </div>
+          <div class="skills-filters">
+            <select id="skills-category-filter" class="filter-select">
+              <option value="">All Categories</option>
+            </select>
+            <select id="skills-source-filter" class="filter-select">
+              <option value="">All Sources</option>
+              <option value="bundled">Bundled</option>
+              <option value="global">Global</option>
+              <option value="workspace">Workspace</option>
+            </select>
+          </div>
+        </div>
+        <!-- Skills Grid -->
+        <div class="skills-grid" id="skills-list">Loading skills...</div>
+      </section>
+
+      <!-- Skill Detail Modal -->
+      <div class="modal-overlay" id="skill-modal">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h2 id="skill-modal-title">Skill Details</h2>
+            <button class="modal-close" id="skill-modal-close">&times;</button>
+          </div>
+          <div class="modal-body" id="skill-modal-body">
+            <!-- Skill details populated by JS -->
+          </div>
+        </div>
+      </div>
+
+      <!-- Nodes Tab -->
+      <section class="tab-content" id="nodes">
+        <div class="nodes-container">
+          <!-- Pairing Section -->
+          <div class="nodes-pairing-section">
+            <div class="card">
+              <h3>Pair New Device</h3>
+              <p class="text-secondary">Generate a pairing code to connect a companion device</p>
+              <div class="pairing-code-display" id="pairing-code-display">
+                <div class="pairing-code-empty">No active pairing code</div>
+              </div>
+              <div class="pairing-actions">
+                <button class="btn" id="generate-pairing-code">Generate Pairing Code</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Connected Nodes Section -->
+          <div class="nodes-list-section">
+            <div class="card">
+              <div class="nodes-header">
+                <h3>Connected Nodes</h3>
+                <button class="btn btn-sm" id="refresh-nodes" title="Refresh">↻</button>
+              </div>
+              <div class="nodes-grid" id="nodes-grid">
+                <div class="nodes-loading">Loading nodes...</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Approved Nodes Section -->
+          <div class="nodes-approved-section">
+            <div class="card">
+              <h3>Approved Nodes</h3>
+              <p class="text-secondary">Devices that have been paired and approved</p>
+              <div class="approved-nodes-list" id="approved-nodes-list">
+                <div class="nodes-loading">Loading approved nodes...</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Debug Logs Tab -->
+      <section class="tab-content" id="logs">
+        <div class="logs-toolbar">
+          <select id="log-level">
+            <option value="debug">Debug</option>
+            <option value="info" selected>Info</option>
+            <option value="warn">Warn</option>
+            <option value="error">Error</option>
+          </select>
+          <button class="btn btn-sm" id="clear-logs">Clear</button>
+          <label class="checkbox-label">
+            <input type="checkbox" id="auto-scroll" checked> Auto-scroll
+          </label>
+        </div>
+        <div class="logs-container" id="logs-container"></div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Toast Notification Container -->
+  <div class="toast-container" id="toast-container"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
+

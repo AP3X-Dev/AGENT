@@ -1,0 +1,152 @@
+# AG3NT CI Pipeline
+# Runs on every push to main/develop and on pull requests
+# Tests both Gateway (TypeScript) and Agent (Python) in parallel
+
+name: "🔧 CI"
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+# Cancel redundant workflow runs
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  NODE_VERSION: "20"
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  # ============================================
+  # Gateway (TypeScript/Node.js) Tests
+  # ============================================
+  gateway:
+    name: "🌐 Gateway"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: apps/gateway
+
+    steps:
+      - name: "📋 Checkout Code"
+        uses: actions/checkout@v4
+
+      - name: "🟢 Setup Node.js"
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+          cache-dependency-path: apps/gateway/package-lock.json
+
+      - name: "📥 Install Dependencies"
+        run: npm ci
+
+      - name: "🔍 Type Check"
+        run: npx tsc --noEmit
+
+      - name: "🧪 Run Tests with Coverage"
+        run: npx vitest run --coverage
+        # Note: Coverage thresholds are configured in vitest.config.ts
+        # Currently set to 40% - will fail if not met
+
+      - name: "📊 Upload Coverage Report"
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gateway-coverage
+          path: apps/gateway/coverage/
+          retention-days: 7
+
+  # ============================================
+  # Agent (Python) Tests
+  # ============================================
+  agent:
+    name: "🤖 Agent"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: apps/agent
+
+    steps:
+      - name: "📋 Checkout Code"
+        uses: actions/checkout@v4
+
+      - name: "🐍 Setup Python"
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+
+      - name: "📥 Install Dependencies"
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]"
+
+      - name: "🧪 Run Tests with Coverage"
+        run: |
+          pytest tests/ \
+            --cov=ag3nt_agent \
+            --cov-report=xml \
+            --cov-report=html \
+            --cov-report=term-missing \
+            --cov-fail-under=40 \
+            -v
+
+      - name: "📊 Upload Coverage Report"
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: agent-coverage
+          path: |
+            apps/agent/coverage.xml
+            apps/agent/htmlcov/
+          retention-days: 7
+
+  # ============================================
+  # Final Status Check
+  # ============================================
+  ci-success:
+    name: "✅ CI Success"
+    needs: [gateway, agent]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: "🎉 Check All Jobs Passed"
+        run: |
+          echo "Gateway: ${{ needs.gateway.result }}"
+          echo "Agent: ${{ needs.agent.result }}"
+          if [[ "${{ needs.gateway.result }}" != "success" ]] || \
+             [[ "${{ needs.agent.result }}" != "success" ]]; then
+            echo "❌ One or more jobs failed"
+            exit 1
+          fi
+          echo "✅ All checks passed!"
+
+  # ============================================
+  # Notify on Failure (Optional - requires secrets)
+  # ============================================
+  notify-failure:
+    name: "🔔 Notify Failure"
+    needs: [gateway, agent]
+    if: failure() && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: "📢 Discord Notification"
+        if: ${{ secrets.DISCORD_WEBHOOK_URL != '' }}
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          curl -H "Content-Type: application/json" \
+            -d "{\"content\": \"❌ CI Failed on ${{ github.repository }}\\nBranch: ${{ github.ref_name }}\\nCommit: ${{ github.sha }}\\nRun: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+            $DISCORD_WEBHOOK
+

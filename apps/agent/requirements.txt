@@ -1,0 +1,24 @@
+# AG3NT Agent Worker dependencies
+fastapi==0.115.0
+uvicorn==0.30.6
+pydantic==2.9.2
+
+# DeepAgents (vendored)
+-e ../../vendor/deepagents/libs/deepagents
+
+# Additional model providers
+langchain-openai>=0.3.0  # For OpenRouter support
+
+# Web tools
+requests>=2.31.0
+markdownify>=0.11.6
+
+# MCP (Model Context Protocol) integration
+langchain-mcp-adapters>=0.1.0
+
+# Semantic memory search
+faiss-cpu>=1.7.4  # Vector similarity search
+langchain-text-splitters>=0.2.0  # Text chunking for memory indexing
+
+# Browser automation
+playwright>=1.40.0  # Web automation and scraping

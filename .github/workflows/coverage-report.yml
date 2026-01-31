@@ -1,0 +1,139 @@
+# AG3NT Coverage Report
+# Posts coverage summary as a PR comment
+
+name: "📊 Coverage Report"
+
+on:
+  workflow_run:
+    workflows: ["🔧 CI"]
+    types: [completed]
+
+permissions:
+  contents: read
+  pull-requests: write
+  actions: read
+
+jobs:
+  coverage-comment:
+    name: "📊 Post Coverage"
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.event == 'pull_request'
+    
+    steps:
+      - name: "📥 Download Gateway Coverage"
+        uses: actions/download-artifact@v4
+        with:
+          name: gateway-coverage
+          path: gateway-coverage
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
+      - name: "📥 Download Agent Coverage"
+        uses: actions/download-artifact@v4
+        with:
+          name: agent-coverage
+          path: agent-coverage
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
+      - name: "📝 Generate Coverage Summary"
+        id: coverage
+        run: |
+          echo "## 📊 Coverage Report" > coverage-summary.md
+          echo "" >> coverage-summary.md
+          
+          # Gateway coverage
+          if [ -f "gateway-coverage/coverage-summary.json" ]; then
+            echo "### 🌐 Gateway (TypeScript)" >> coverage-summary.md
+            LINES=$(jq -r '.total.lines.pct' gateway-coverage/coverage-summary.json 2>/dev/null || echo "N/A")
+            BRANCHES=$(jq -r '.total.branches.pct' gateway-coverage/coverage-summary.json 2>/dev/null || echo "N/A")
+            FUNCTIONS=$(jq -r '.total.functions.pct' gateway-coverage/coverage-summary.json 2>/dev/null || echo "N/A")
+            echo "| Metric | Coverage |" >> coverage-summary.md
+            echo "|--------|----------|" >> coverage-summary.md
+            echo "| Lines | ${LINES}% |" >> coverage-summary.md
+            echo "| Branches | ${BRANCHES}% |" >> coverage-summary.md
+            echo "| Functions | ${FUNCTIONS}% |" >> coverage-summary.md
+            echo "" >> coverage-summary.md
+          else
+            echo "### 🌐 Gateway (TypeScript)" >> coverage-summary.md
+            echo "_Coverage data not available_" >> coverage-summary.md
+            echo "" >> coverage-summary.md
+          fi
+          
+          # Agent coverage
+          if [ -f "agent-coverage/coverage.xml" ]; then
+            echo "### 🤖 Agent (Python)" >> coverage-summary.md
+            # Extract coverage from XML
+            COVERAGE=$(grep -oP 'line-rate="\K[^"]+' agent-coverage/coverage.xml 2>/dev/null | head -1 || echo "0")
+            PERCENT=$(echo "$COVERAGE * 100" | bc -l 2>/dev/null | xargs printf "%.1f" 2>/dev/null || echo "N/A")
+            echo "| Metric | Coverage |" >> coverage-summary.md
+            echo "|--------|----------|" >> coverage-summary.md
+            echo "| Lines | ${PERCENT}% |" >> coverage-summary.md
+            echo "" >> coverage-summary.md
+          else
+            echo "### 🤖 Agent (Python)" >> coverage-summary.md
+            echo "_Coverage data not available_" >> coverage-summary.md
+            echo "" >> coverage-summary.md
+          fi
+          
+          echo "---" >> coverage-summary.md
+          echo "_Coverage threshold: 40%_" >> coverage-summary.md
+          
+          cat coverage-summary.md
+
+      - name: "💬 Find PR Number"
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const response = await github.rest.search.issuesAndPullRequests({
+              q: `repo:${context.repo.owner}/${context.repo.repo} is:pr sha:${context.payload.workflow_run.head_sha}`,
+              per_page: 1,
+            });
+            const items = response.data.items;
+            if (items.length < 1) {
+              console.log('No PR found');
+              return;
+            }
+            const prNumber = items[0].number;
+            console.log(`PR number: ${prNumber}`);
+            return prNumber;
+
+      - name: "💬 Post Coverage Comment"
+        if: steps.pr.outputs.result
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('coverage-summary.md', 'utf8');
+            const prNumber = ${{ steps.pr.outputs.result }};
+            
+            // Find existing comment
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+            });
+            
+            const botComment = comments.data.find(c => 
+              c.user.type === 'Bot' && c.body.includes('📊 Coverage Report')
+            );
+            
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                body: body,
+              });
+            }
+
