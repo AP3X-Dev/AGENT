@@ -517,6 +517,10 @@ def _load_mcp_tools() -> list:
             # The library expects: {"server_name": {"command": ..., "args": ..., "env": ...}}
             server_params = {}
             for name, server_config in servers.items():
+                # Allow UI/config tools to mark servers as disabled without removing them.
+                if isinstance(server_config, dict) and server_config.get("enabled") is False:
+                    logger.info("Skipping disabled MCP server: %s", name)
+                    continue
                 server_params[name] = {
                     "command": server_config.get("command"),
                     "args": server_config.get("args", []),
@@ -720,15 +724,26 @@ def schedule_reminder(
 
 
 def _create_subagents() -> list[dict]:
-    """Create the sub-agent specifications using SubagentConfig.
+    """Create the sub-agent specifications using SubagentRegistry.
 
     Returns:
-        List of SubAgent dicts for Researcher, Coder, Reviewer, and Planner.
+        List of SubAgent dicts for all registered subagents.
 
-    The subagent configurations are defined in subagent_configs.py and converted
-    to the dict format expected by DeepAgents SubAgentMiddleware.
+    The subagent configurations are managed by SubagentRegistry which supports:
+    - Builtin subagents (8 predefined types)
+    - Plugin-registered subagents
+    - User-defined subagents from config files (~/.ag3nt/subagents/)
+
+    Configurations are converted to the dict format expected by DeepAgents SubAgentMiddleware.
     """
-    from ag3nt_agent.subagent_configs import SUBAGENT_REGISTRY
+    from ag3nt_agent.subagent_registry import SubagentRegistry
+
+    # Get registry and load user-defined configs from ~/.ag3nt/subagents/
+    registry = SubagentRegistry.get_instance()
+    user_data_path = _get_user_data_path()
+    loaded = registry.load_user_configs(user_data_path)
+    if loaded > 0:
+        logger.info("Loaded %d user-defined subagents from %s/subagents/", loaded, user_data_path)
 
     # Map tool names to actual tool functions
     # This maps the string tool names in SubagentConfig.tools to actual callable tools
@@ -762,7 +777,7 @@ def _create_subagents() -> list[dict]:
         pass
 
     subagents = []
-    for config in SUBAGENT_REGISTRY.values():
+    for config in registry.list_all():
         # Convert tool names to actual tool functions
         tools = []
         uses_default_tools = False
@@ -790,6 +805,7 @@ def _create_subagents() -> list[dict]:
         }
         subagents.append(subagent_dict)
 
+    logger.info("Created %d subagents from registry", len(subagents))
     return subagents
 
 
@@ -1417,4 +1433,3 @@ def resume_turn(
         "events": events,
         "usage": usage,
     }
-

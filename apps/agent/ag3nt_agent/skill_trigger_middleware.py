@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 import yaml
 from langchain.agents.middleware.types import AgentMiddleware, AgentState, ModelRequest, ModelResponse
@@ -160,3 +160,44 @@ class SkillTriggerMiddleware(AgentMiddleware):
         
         return handler(modified_request)
 
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelResponse:
+        """Inject skill suggestions based on trigger matching (async version)."""
+        # Get the last user message
+        last_user_message = None
+        for msg in reversed(request.messages):
+            if isinstance(msg, HumanMessage):
+                last_user_message = msg.content
+                break
+
+        if not last_user_message or not isinstance(last_user_message, str):
+            return await handler(request)
+
+        # Load triggers and match
+        triggers_map = self._load_triggers()
+        matched_skills = match_triggers(last_user_message, triggers_map)
+
+        if not matched_skills:
+            return await handler(request)
+
+        # Inject skill suggestions into system prompt
+        suggestion_text = "\n\n**💡 Skill Suggestions:**\n\n"
+        suggestion_text += "Based on the user's message, these skills may be relevant:\n"
+        for skill_name in matched_skills:
+            suggestion_text += (
+                f"- **{skill_name}**: Consider reading its SKILL.md for specialized workflows\n"
+            )
+        suggestion_text += (
+            "\nRemember to use the `run_skill` tool to execute skill entrypoints when appropriate."
+        )
+
+        # Append to system message
+        from deepagents.middleware._utils import append_to_system_message
+
+        new_system_message = append_to_system_message(request.system_message, suggestion_text)
+        modified_request = request.override(system_message=new_system_message)
+
+        return await handler(modified_request)

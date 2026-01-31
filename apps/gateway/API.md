@@ -550,6 +550,105 @@ Toggle a skill on or off.
 
 ---
 
+## Subagents
+
+Subagent management endpoints. Subagents are specialized AI personalities that can be delegated specific tasks. They can come from three sources: `builtin` (core subagents shipped with AG3NT), `user` (custom subagents defined by the user), and `plugin` (subagents registered by plugins).
+
+### GET /api/subagents
+
+List all registered subagents.
+
+**Response:**
+```json
+{
+  "subagents": [
+    {
+      "name": "RESEARCHER",
+      "description": "Specializes in finding and synthesizing information from various sources",
+      "source": "builtin",
+      "tools": ["fetch_url", "bing_search"],
+      "max_tokens": 8000,
+      "priority": 1
+    },
+    {
+      "name": "DEBUGGER",
+      "description": "Custom debugging assistant",
+      "source": "user",
+      "tools": ["execute", "read_file"],
+      "max_tokens": 8000,
+      "priority": 5
+    }
+  ],
+  "count": 2
+}
+```
+
+### GET /api/subagents/:name
+
+Get a specific subagent's full configuration.
+
+**Response:**
+```json
+{
+  "ok": true,
+  "name": "RESEARCHER",
+  "description": "Specializes in finding and synthesizing information from various sources",
+  "source": "builtin",
+  "tools": ["fetch_url", "bing_search"],
+  "max_tokens": 8000,
+  "max_turns": 5,
+  "thinking_mode": "enabled",
+  "system_prompt": "You are a research specialist..."
+}
+```
+
+### POST /api/subagents
+
+Register a new custom subagent (user-defined).
+
+**Request:**
+```json
+{
+  "name": "DEBUGGER",
+  "description": "Specialized debugging assistant for tracking down issues",
+  "system_prompt": "You are a debugging specialist...",
+  "tools": ["execute", "read_file", "write_file"],
+  "max_tokens": 8000,
+  "max_turns": 5
+}
+```
+
+**Response:**
+```json
+{
+  "message": "Subagent 'DEBUGGER' registered successfully",
+  "name": "DEBUGGER"
+}
+```
+
+**Note:** User-defined subagents are persisted to `~/.ag3nt/subagents/{name}.yaml` and automatically loaded on startup.
+
+### DELETE /api/subagents/:name
+
+Unregister a custom subagent. Only user-defined subagents can be deleted.
+
+**Response:**
+```json
+{
+  "message": "Subagent 'DEBUGGER' unregistered successfully",
+  "name": "DEBUGGER"
+}
+```
+
+**Error (attempting to delete builtin):**
+```json
+{
+  "detail": "Cannot delete builtin subagent 'RESEARCHER'"
+}
+```
+
+---
+
 ## Logs
 
 ### GET /api/logs/recent

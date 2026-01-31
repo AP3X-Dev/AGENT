@@ -3,10 +3,13 @@
 This module provides:
 - SubagentConfig: Dataclass for defining subagent specifications
 - Predefined subagent types: 8 specialized agents for different tasks
-- SUBAGENT_REGISTRY: Registry of all available subagents
+- BUILTIN_SUBAGENTS: Static dictionary of builtin subagent configurations
 - SubagentResourceLimits: Resource constraints for subagent execution
 - SubagentResourceManager: Manages concurrent subagent limits
 - ThinkingMode: Configurable thinking levels for reasoning tasks
+
+For dynamic subagent management (runtime registration/unregistration),
+use SubagentRegistry from subagent_registry.py instead.
 
 Matches and exceeds Moltbot reference implementation capabilities.
 """
@@ -434,10 +437,14 @@ Guidelines:
 
 
 # =============================================================================
-# SUBAGENT REGISTRY
+# BUILTIN SUBAGENTS
 # =============================================================================
 
-SUBAGENT_REGISTRY: dict[str, SubagentConfig] = {
+# Note: This dictionary is now named BUILTIN_SUBAGENTS.
+# For dynamic subagent management, use SubagentRegistry from subagent_registry.py
+# which provides runtime registration/unregistration capabilities.
+
+BUILTIN_SUBAGENTS: dict[str, SubagentConfig] = {
     "researcher": RESEARCHER,
     "coder": CODER,
     "reviewer": REVIEWER,
@@ -448,9 +455,15 @@ SUBAGENT_REGISTRY: dict[str, SubagentConfig] = {
     "memory": MEMORY,
 }
 
+# Backward compatibility alias (deprecated, use SubagentRegistry instead)
+SUBAGENT_REGISTRY = BUILTIN_SUBAGENTS
+
 
 def get_subagent_config(name: str) -> SubagentConfig:
     """Get a subagent configuration by name.
+
+    DEPRECATED: Use SubagentRegistry.get_instance().get(name) instead.
+    This function only looks up builtin subagents.
 
     Args:
         name: The subagent type name.
@@ -461,19 +474,22 @@ def get_subagent_config(name: str) -> SubagentConfig:
     Raises:
         ValueError: If the subagent type is not found.
     """
-    if name not in SUBAGENT_REGISTRY:
-        available = list(SUBAGENT_REGISTRY.keys())
+    if name not in BUILTIN_SUBAGENTS:
+        available = list(BUILTIN_SUBAGENTS.keys())
         raise ValueError(f"Unknown subagent: {name}. Available: {available}")
-    return SUBAGENT_REGISTRY[name]
+    return BUILTIN_SUBAGENTS[name]
 
 
 def list_subagent_types() -> list[str]:
     """List all available subagent types.
 
+    DEPRECATED: Use SubagentRegistry.get_instance().list_names() instead.
+    This function only lists builtin subagents.
+
     Returns:
         List of subagent type names.
     """
-    return list(SUBAGENT_REGISTRY.keys())
+    return list(BUILTIN_SUBAGENTS.keys())
 
 
 # =============================================================================

@@ -2,7 +2,7 @@
 <img src=".github/images/AG3NT_header.png" alt="AG3NT" width="100%"/>
 
 
-# 🚀 AG3NT
+
 
 
 Local-first personal AI agent platform built on DeepAgents.

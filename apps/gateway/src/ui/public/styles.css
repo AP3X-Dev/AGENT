@@ -1296,3 +1296,73 @@ body {
   font-size: 0.75rem;
   color: var(--text-muted);
 }
+
+/* ==================== Subagents Tab ==================== */
+
+.subagents-header {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 1rem; flex-wrap: wrap; gap: 1rem;
+}
+.subagents-header h2 { margin: 0; }
+.subagents-actions { display: flex; gap: 0.5rem; }
+
+.subagents-info {
+  background: var(--bg-secondary); border: 1px solid var(--border-color);
+  border-radius: 8px; padding: 1rem; margin-bottom: 1.5rem;
+}
+.subagents-info p { margin: 0 0 0.5rem 0; color: var(--text-secondary); }
+.subagents-info ul { margin: 0; padding-left: 1.5rem; }
+.subagents-info li { color: var(--text-secondary); font-size: 0.875rem; margin-bottom: 0.25rem; }
+
+.subagents-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1rem; }
+.subagents-empty { text-align: center; padding: 2rem; color: var(--text-muted); }
+
+.subagent-card {
+  background: var(--bg-secondary); border: 1px solid var(--border-color);
+  border-radius: 8px; padding: 1rem; cursor: pointer; transition: all 0.2s ease;
+  position: relative;
+}
+.subagent-card:hover { border-color: var(--accent-primary); transform: translateY(-2px); }
+
+.subagent-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem; }
+.subagent-name { font-weight: 600; font-size: 1rem; margin: 0; }
+.subagent-source {
+  font-size: 0.65rem; padding: 0.125rem 0.5rem; border-radius: 3px;
+  font-weight: 600; text-transform: uppercase;
+}
+.source-builtin { background: rgba(100, 116, 139, 0.2); color: var(--text-secondary); }
+.source-user { background: rgba(34, 197, 94, 0.2); color: var(--success); }
+.source-plugin { background: rgba(168, 85, 247, 0.2); color: #a855f7; }
+
+.subagent-description {
+  font-size: 0.875rem; color: var(--text-secondary);
+  margin: 0 0 0.75rem 0; line-height: 1.4;
+}
+.subagent-meta { display: flex; gap: 1rem; font-size: 0.75rem; color: var(--text-muted); }
+.subagent-delete {
+  position: absolute; bottom: 0.75rem; right: 0.75rem;
+  padding: 0.25rem 0.5rem; font-size: 0.7rem;
+}
+
+/* Subagent Detail Modal */
+.subagent-detail .detail-row { margin-bottom: 1rem; }
+.subagent-detail label { display: block; font-weight: 600; margin-bottom: 0.25rem; color: var(--text-muted); font-size: 0.75rem; text-transform: uppercase; }
+.subagent-detail p { margin: 0; color: var(--text-secondary); }
+.subagent-detail .system-prompt {
+  background: var(--bg-secondary); padding: 0.75rem; border-radius: 6px;
+  font-size: 0.8rem; white-space: pre-wrap; max-height: 200px; overflow-y: auto;
+  border: 1px solid var(--border-color);
+}
+
+/* Subagent Form */
+.subagent-form .form-group { margin-bottom: 1rem; }
+.subagent-form label { display: block; margin-bottom: 0.25rem; font-weight: 500; }
+.subagent-form input, .subagent-form textarea {
+  width: 100%; padding: 0.5rem 0.75rem; background: var(--bg-secondary);
+  border: 1px solid var(--border-color); border-radius: 6px;
+  color: var(--text-primary); font-size: 0.875rem;
+}
+.subagent-form input:focus, .subagent-form textarea:focus { outline: none; border-color: var(--accent-primary); }
+.subagent-form .form-row { display: flex; gap: 1rem; }
+.subagent-form .form-row .form-group { flex: 1; }
+.subagent-form .form-actions { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 1.5rem; }

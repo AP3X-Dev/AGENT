@@ -29,6 +29,7 @@
       <button class="nav-btn" data-tab="sessions">Sessions</button>
       <button class="nav-btn" data-tab="memory">Memory</button>
       <button class="nav-btn" data-tab="skills">Skills</button>
+      <button class="nav-btn" data-tab="subagents">Subagents</button>
       <button class="nav-btn" data-tab="nodes">Nodes</button>
       <button class="nav-btn" data-tab="logs">Debug Logs</button>
     </nav>
@@ -293,6 +294,39 @@
           </div>
           <div class="modal-body" id="skill-modal-body">
             <!-- Skill details populated by JS -->
+          </div>
+        </div>
+      </div>
+
+      <!-- Subagents Tab -->
+      <section class="tab-content" id="subagents">
+        <div class="subagents-header">
+          <h2>Subagent Registry</h2>
+          <div class="subagents-actions">
+            <button class="btn btn-sm" id="refresh-subagents">↻ Refresh</button>
+            <button class="btn btn-sm btn-primary" id="add-subagent">+ New Subagent</button>
+          </div>
+        </div>
+        <div class="subagents-info">
+          <p>Subagents are specialized AI personalities that can be delegated specific tasks.</p>
+          <ul>
+            <li><strong>Builtin:</strong> Core subagents shipped with AG3NT (cannot be modified)</li>
+            <li><strong>User:</strong> Custom subagents you've defined (stored in ~/.ag3nt/subagents/)</li>
+            <li><strong>Plugin:</strong> Subagents registered by plugins</li>
+          </ul>
+        </div>
+        <div class="subagents-grid" id="subagents-list">Loading subagents...</div>
+      </section>
+
+      <!-- Subagent Detail/Create Modal -->
+      <div class="modal-overlay" id="subagent-modal">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h2 id="subagent-modal-title">Subagent Details</h2>
+            <button class="modal-close" id="subagent-modal-close">&times;</button>
+          </div>
+          <div class="modal-body" id="subagent-modal-body">
+            <!-- Subagent form/details populated by JS -->
           </div>
         </div>
       </div>
