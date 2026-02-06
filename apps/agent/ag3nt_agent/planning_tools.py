@@ -7,13 +7,19 @@ It complements the TodoListMiddleware from langchain by providing:
 - Task filtering and markdown export
 """
 
+import json
+import logging
+import threading
+import uuid
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Annotated, Literal
-import json
-import uuid
+
+from langchain_core.tools import tool
+
+logger = logging.getLogger("ag3nt.tools.planning")
 
 
 class TaskStatus(Enum):
@@ -84,6 +90,7 @@ class PlanningTools:
         """
         self.storage_path = Path(storage_path)
         self.tasks: dict[str, Task] = {}
+        self._lock = threading.Lock()
         self._load()
 
     def _load(self) -> None:
@@ -100,11 +107,13 @@ class PlanningTools:
                 self.tasks = {}
 
     def _save(self) -> None:
-        """Save tasks to storage file."""
+        """Save tasks to storage file using atomic write."""
         self.storage_path.parent.mkdir(parents=True, exist_ok=True)
         data = {"tasks": [task.to_dict() for task in self.tasks.values()]}
-        with open(self.storage_path, "w", encoding="utf-8") as f:
+        tmp_path = self.storage_path.with_suffix(".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
+        tmp_path.replace(self.storage_path)
 
     def create_task(
         self,
@@ -138,8 +147,9 @@ class PlanningTools:
             parent_id=parent_id,
             notes=notes,
         )
-        self.tasks[task_id] = task
-        self._save()
+        with self._lock:
+            self.tasks[task_id] = task
+            self._save()
         return task
 
     def update_task(
@@ -166,22 +176,23 @@ class PlanningTools:
         Raises:
             ValueError: If task_id is not found.
         """
-        if task_id not in self.tasks:
-            raise ValueError(f"Task not found: {task_id}")
+        with self._lock:
+            if task_id not in self.tasks:
+                raise ValueError(f"Task not found: {task_id}")
 
-        task = self.tasks[task_id]
-        if status is not None:
-            task.status = status
-        if title is not None:
-            task.title = title
-        if notes is not None:
-            task.notes = notes
-        if priority is not None:
-            task.priority = priority
-        task.updated_at = datetime.now()
+            task = self.tasks[task_id]
+            if status is not None:
+                task.status = status
+            if title is not None:
+                task.title = title
+            if notes is not None:
+                task.notes = notes
+            if priority is not None:
+                task.priority = priority
+            task.updated_at = datetime.now()
 
-        self._save()
-        return task
+            self._save()
+            return task
 
     def delete_task(self, task_id: str) -> bool:
         """Delete a task.
@@ -192,11 +203,12 @@ class PlanningTools:
         Returns:
             True if task was deleted, False if not found.
         """
-        if task_id in self.tasks:
-            del self.tasks[task_id]
-            self._save()
-            return True
-        return False
+        with self._lock:
+            if task_id in self.tasks:
+                del self.tasks[task_id]
+                self._save()
+                return True
+            return False
 
     def get_task(self, task_id: str) -> Task | None:
         """Get a single task by ID.
@@ -207,7 +219,8 @@ class PlanningTools:
         Returns:
             The Task object, or None if not found.
         """
-        return self.tasks.get(task_id)
+        with self._lock:
+            return self.tasks.get(task_id)
 
     def get_tasks(
         self,
@@ -226,7 +239,8 @@ class PlanningTools:
         Returns:
             List of matching Task objects, sorted by creation time (newest first).
         """
-        tasks = list(self.tasks.values())
+        with self._lock:
+            tasks = list(self.tasks.values())
 
         if status is not None:
             tasks = [t for t in tasks if t.status == status]
@@ -243,16 +257,17 @@ class PlanningTools:
         Returns:
             Number of tasks removed.
         """
-        completed_ids = [
-            task_id
-            for task_id, task in self.tasks.items()
-            if task.status == TaskStatus.COMPLETED
-        ]
-        for task_id in completed_ids:
-            del self.tasks[task_id]
-        if completed_ids:
-            self._save()
-        return len(completed_ids)
+        with self._lock:
+            completed_ids = [
+                task_id
+                for task_id, task in self.tasks.items()
+                if task.status == TaskStatus.COMPLETED
+            ]
+            for task_id in completed_ids:
+                del self.tasks[task_id]
+            if completed_ids:
+                self._save()
+            return len(completed_ids)
 
     def to_markdown(self) -> str:
         """Export tasks as markdown.
@@ -260,10 +275,13 @@ class PlanningTools:
         Returns:
             Markdown string representing all tasks grouped by status.
         """
+        with self._lock:
+            tasks_snapshot = list(self.tasks.values())
+
         lines = ["# Tasks\n"]
 
         for status in TaskStatus:
-            status_tasks = [t for t in self.tasks.values() if t.status == status]
+            status_tasks = [t for t in tasks_snapshot if t.status == status]
             if status_tasks:
                 status_title = status.value.replace("_", " ").title()
                 lines.append(f"\n## {status_title}\n")
@@ -281,8 +299,10 @@ class PlanningTools:
         Returns:
             JSON string of all tasks.
         """
+        with self._lock:
+            tasks_snapshot = list(self.tasks.values())
         return json.dumps(
-            {"tasks": [task.to_dict() for task in self.tasks.values()]},
+            {"tasks": [task.to_dict() for task in tasks_snapshot]},
             indent=2,
         )
 
@@ -308,4 +328,125 @@ def create_planning_tools(storage_path: Path | None = None) -> PlanningTools:
     if storage_path is None:
         storage_path = get_default_storage_path()
     return PlanningTools(storage_path)
+
+
+# =============================================================================
+# LangChain @tool wrappers
+# =============================================================================
+
+_planning: PlanningTools | None = None
+_planning_lock = threading.Lock()
+
+
+def _get_planning() -> PlanningTools:
+    """Get or create the singleton PlanningTools instance."""
+    global _planning
+    if _planning is None:
+        with _planning_lock:
+            if _planning is None:
+                _planning = create_planning_tools()
+    return _planning
+
+
+@tool
+def write_todos(
+    tasks: list[str],
+    priority: str = "medium",
+) -> str:
+    """Create one or more tasks in the planning system.
+
+    Use this to break down complex work into actionable steps before starting.
+    Each task is tracked with status and can be updated as you progress.
+
+    Args:
+        tasks: List of task titles to create.
+        priority: Priority for all tasks - "low", "medium", or "high".
+    """
+    planner = _get_planning()
+    created = []
+    for title in tasks:
+        task = planner.create_task(title, priority=priority)
+        created.append(f"  - [{task.id}] {task.title} ({task.priority})")
+
+    return f"Created {len(created)} task(s):\n" + "\n".join(created)
+
+
+@tool
+def read_todos(
+    status: str | None = None,
+    format: str = "markdown",
+) -> str:
+    """Read current tasks from the planning system.
+
+    Args:
+        status: Filter by status - "pending", "in_progress", "completed", "blocked". None for all.
+        format: Output format - "markdown" or "json".
+    """
+    planner = _get_planning()
+
+    if format == "json":
+        return planner.to_json()
+
+    if status:
+        try:
+            status_enum = TaskStatus(status)
+        except ValueError:
+            return f"Invalid status: {status}. Use: pending, in_progress, completed, blocked"
+        tasks = planner.get_tasks(status=status_enum)
+        if not tasks:
+            return f"No tasks with status '{status}'."
+        lines = [f"# Tasks ({status})\n"]
+        for t in tasks:
+            checkbox = "[x]" if t.status == TaskStatus.COMPLETED else "[ ]"
+            lines.append(f"- {checkbox} **{t.title}** [{t.id}] ({t.priority})")
+            if t.notes:
+                lines.append(f"  - {t.notes}")
+        return "\n".join(lines)
+
+    return planner.to_markdown()
+
+
+@tool
+def update_todo(
+    task_id: str,
+    status: str | None = None,
+    notes: str | None = None,
+    title: str | None = None,
+) -> str:
+    """Update a task's status, title, or notes.
+
+    Args:
+        task_id: The task ID to update (e.g. "task_abc123def456").
+        status: New status - "pending", "in_progress", "completed", "blocked".
+        notes: Additional notes to attach to the task.
+        title: New title for the task.
+    """
+    planner = _get_planning()
+
+    status_enum = None
+    if status:
+        try:
+            status_enum = TaskStatus(status)
+        except ValueError:
+            return f"Invalid status: {status}. Use: pending, in_progress, completed, blocked"
+
+    try:
+        task = planner.update_task(
+            task_id,
+            status=status_enum,
+            title=title,
+            notes=notes,
+        )
+        return f"Updated task [{task.id}]: {task.title} (status={task.status.value}, priority={task.priority})"
+    except ValueError as e:
+        return f"Error: {e}"
+
+
+def get_planning_tools() -> list:
+    """Get all planning LangChain tools for the agent.
+
+    Returns:
+        List of @tool decorated planning functions.
+    """
+    return [write_todos, read_todos, update_todo]
 
