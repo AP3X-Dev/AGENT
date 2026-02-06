@@ -85,7 +85,7 @@ jobs:
 
       - name: "💬 Find PR Number"
         id: pr
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const response = await github.rest.search.issuesAndPullRequests({
@@ -103,7 +103,7 @@ jobs:
 
       - name: "💬 Post Coverage Comment"
         if: steps.pr.outputs.result
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const fs = require('fs');
