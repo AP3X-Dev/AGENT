@@ -1,6 +1,7 @@
 """Unit tests for planning_tools module."""
 
 import json
+import threading
 import pytest
 from datetime import datetime
 from pathlib import Path
@@ -11,6 +12,10 @@ from ag3nt_agent.planning_tools import (
     TaskStatus,
     get_default_storage_path,
     create_planning_tools,
+    get_planning_tools,
+    write_todos,
+    read_todos,
+    update_todo,
 )
 
 
@@ -389,4 +394,234 @@ class TestModuleFunctions:
         custom_path = tmp_path / "custom" / "tasks.json"
         planner = create_planning_tools(custom_path)
         assert planner.storage_path == custom_path
+
+
+# ============================================================================
+# @tool Wrapper Tests
+# ============================================================================
+
+
+class TestGetPlanningTools:
+    """Tests for get_planning_tools() factory function."""
+
+    def test_returns_list(self):
+        """Test that get_planning_tools returns a list."""
+        tools = get_planning_tools()
+        assert isinstance(tools, list)
+
+    def test_returns_three_tools(self):
+        """Test that get_planning_tools returns exactly 3 tools."""
+        tools = get_planning_tools()
+        assert len(tools) == 3
+
+    def test_tool_names(self):
+        """Test that all expected tools are present."""
+        tools = get_planning_tools()
+        tool_names = {t.name for t in tools}
+        expected = {"write_todos", "read_todos", "update_todo"}
+        assert tool_names == expected
+
+    def test_tools_have_descriptions(self):
+        """Test that all tools have descriptions."""
+        tools = get_planning_tools()
+        for t in tools:
+            assert t.description, f"Tool {t.name} has no description"
+
+
+class TestPlanningToolWrappers:
+    """Tests for @tool decorated planning wrapper functions."""
+
+    @pytest.fixture(autouse=True)
+    def _use_temp_storage(self, tmp_path, monkeypatch):
+        """Use temporary storage for planning tools during tests."""
+        import ag3nt_agent.planning_tools as pt
+
+        # Reset singleton
+        pt._planning = None
+        # Monkeypatch default storage path
+        monkeypatch.setattr(pt, "get_default_storage_path", lambda: tmp_path / "todos.json")
+
+    def test_write_todos_single(self):
+        """Test creating a single task."""
+        result = write_todos.invoke({"tasks": ["Build feature"]})
+        assert "Created 1 task(s)" in result
+        assert "Build feature" in result
+
+    def test_write_todos_multiple(self):
+        """Test creating multiple tasks."""
+        result = write_todos.invoke({"tasks": ["Task A", "Task B", "Task C"]})
+        assert "Created 3 task(s)" in result
+
+    def test_write_todos_with_priority(self):
+        """Test creating tasks with priority."""
+        result = write_todos.invoke({"tasks": ["Urgent task"], "priority": "high"})
+        assert "high" in result
+
+    def test_read_todos_empty(self):
+        """Test reading when no tasks exist."""
+        result = read_todos.invoke({})
+        assert "# Tasks" in result
+
+    def test_read_todos_after_write(self):
+        """Test reading tasks after writing."""
+        write_todos.invoke({"tasks": ["Test task"]})
+        result = read_todos.invoke({})
+        assert "Test task" in result
+
+    def test_read_todos_by_status(self):
+        """Test filtering tasks by status."""
+        result = read_todos.invoke({"status": "pending"})
+        # Either "No tasks" or task list
+        assert isinstance(result, str)
+
+    def test_read_todos_invalid_status(self):
+        """Test reading with invalid status."""
+        result = read_todos.invoke({"status": "invalid"})
+        assert "Invalid status" in result
+
+    def test_read_todos_json_format(self):
+        """Test reading tasks in JSON format."""
+        write_todos.invoke({"tasks": ["JSON test"]})
+        result = read_todos.invoke({"format": "json"})
+        data = json.loads(result)
+        assert "tasks" in data
+
+    def test_update_todo_status(self):
+        """Test updating task status."""
+        write_result = write_todos.invoke({"tasks": ["Update me"]})
+        # Extract task ID from result
+        import re
+        match = re.search(r"\[(\w+)\]", write_result)
+        assert match, f"Could not find task ID in: {write_result}"
+        task_id = match.group(1)
+
+        result = update_todo.invoke({"task_id": task_id, "status": "in_progress"})
+        assert "Updated task" in result
+        assert "in_progress" in result
+
+    def test_update_todo_not_found(self):
+        """Test updating non-existent task."""
+        result = update_todo.invoke({"task_id": "nonexistent", "status": "completed"})
+        assert "Error" in result
+
+    def test_update_todo_invalid_status(self):
+        """Test updating with invalid status."""
+        result = update_todo.invoke({"task_id": "task_123", "status": "invalid"})
+        assert "Invalid status" in result
+
+
+class TestPlanningToolsConcurrency:
+    """Concurrency tests for PlanningTools."""
+
+    @pytest.fixture
+    def planner(self, tmp_path: Path):
+        return PlanningTools(tmp_path / "tasks.json")
+
+    def test_concurrent_create_tasks(self, planner):
+        """10 threads each create a task, verify all 10 exist."""
+        barrier = threading.Barrier(10)
+        task_ids = []
+        lock = threading.Lock()
+
+        def create(i):
+            barrier.wait()
+            task = planner.create_task(f"Task-{i}")
+            with lock:
+                task_ids.append(task.id)
+
+        threads = [threading.Thread(target=create, args=(i,)) for i in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert len(task_ids) == 10
+        all_tasks = planner.get_tasks()
+        assert len(all_tasks) == 10
+
+    def test_concurrent_create_and_update(self, planner):
+        """5 create + 5 update simultaneously, no corruption."""
+        # Pre-create some tasks to update
+        pre_tasks = [planner.create_task(f"Pre-{i}") for i in range(5)]
+
+        barrier = threading.Barrier(10)
+        errors = []
+
+        def create(i):
+            try:
+                barrier.wait()
+                planner.create_task(f"New-{i}")
+            except Exception as e:
+                errors.append(e)
+
+        def update(task_id):
+            try:
+                barrier.wait()
+                planner.update_task(task_id, status=TaskStatus.IN_PROGRESS)
+            except Exception as e:
+                errors.append(e)
+
+        threads = []
+        for i in range(5):
+            threads.append(threading.Thread(target=create, args=(i,)))
+            threads.append(threading.Thread(target=update, args=(pre_tasks[i].id,)))
+
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert len(errors) == 0
+        assert len(planner.get_tasks()) == 10  # 5 pre + 5 new
+
+    def test_concurrent_save_no_data_loss(self, tmp_path):
+        """Create from multiple threads, verify JSON contains all."""
+        storage_path = tmp_path / "concurrent.json"
+        planner = PlanningTools(storage_path)
+
+        barrier = threading.Barrier(10)
+        task_ids = []
+        lock = threading.Lock()
+
+        def create(i):
+            barrier.wait()
+            task = planner.create_task(f"Task-{i}")
+            with lock:
+                task_ids.append(task.id)
+
+        threads = [threading.Thread(target=create, args=(i,)) for i in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # Reload from disk and verify
+        planner2 = PlanningTools(storage_path)
+        assert len(planner2.tasks) == 10
+        for tid in task_ids:
+            assert tid in planner2.tasks
+
+    def test_singleton_thread_safety(self, tmp_path, monkeypatch):
+        """10 threads call _get_planning(), verify same instance."""
+        import ag3nt_agent.planning_tools as pt
+
+        pt._planning = None
+        monkeypatch.setattr(pt, "get_default_storage_path", lambda: tmp_path / "todos.json")
+
+        barrier = threading.Barrier(10)
+        results = []
+
+        def get():
+            barrier.wait()
+            planner = pt._get_planning()
+            results.append(id(planner))
+
+        threads = [threading.Thread(target=get) for _ in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert len(results) == 10
+        assert len(set(results)) == 1
 

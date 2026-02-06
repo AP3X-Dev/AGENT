@@ -23,6 +23,9 @@ import heapq
 import json
 import threading
 import uuid
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class SubagentEventType(str, Enum):
@@ -325,6 +328,7 @@ class SubagentMonitor:
             Path(persistence_path) if persistence_path else self.DEFAULT_PERSISTENCE_PATH
         )
         self.auto_persist = auto_persist
+        self._lock = threading.Lock()
 
         # Lifecycle event callbacks
         self._event_callbacks: dict[SubagentEventType, list[SubagentEventCallback]] = {
@@ -358,10 +362,11 @@ class SubagentMonitor:
             monitor.on_event(SubagentEventType.FAILED, my_error_handler)
         """
         def register(cb: SubagentEventCallback) -> SubagentEventCallback:
-            if event_type is None:
-                self._global_callbacks.append(cb)
-            else:
-                self._event_callbacks[event_type].append(cb)
+            with self._lock:
+                if event_type is None:
+                    self._global_callbacks.append(cb)
+                else:
+                    self._event_callbacks[event_type].append(cb)
             return cb
 
         if callback is not None:
@@ -383,15 +388,16 @@ class SubagentMonitor:
         Returns:
             True if callback was found and removed.
         """
-        if event_type is None:
-            if callback in self._global_callbacks:
-                self._global_callbacks.remove(callback)
-                return True
-        else:
-            if callback in self._event_callbacks[event_type]:
-                self._event_callbacks[event_type].remove(callback)
-                return True
-        return False
+        with self._lock:
+            if event_type is None:
+                if callback in self._global_callbacks:
+                    self._global_callbacks.remove(callback)
+                    return True
+            else:
+                if callback in self._event_callbacks[event_type]:
+                    self._event_callbacks[event_type].remove(callback)
+                    return True
+            return False
 
     def _emit_event(
         self,
@@ -419,18 +425,23 @@ class SubagentMonitor:
             data=data or {},
         )
 
+        # Snapshot callback lists under lock, iterate outside lock
+        with self._lock:
+            type_callbacks = list(self._event_callbacks[event_type])
+            global_callbacks = list(self._global_callbacks)
+
         # Call type-specific callbacks
-        for cb in self._event_callbacks[event_type]:
+        for cb in type_callbacks:
             try:
                 cb(event)
-            except Exception:
+            except (TypeError, ValueError, RuntimeError):
                 pass  # Don't let callback errors break execution
 
         # Call global callbacks
-        for cb in self._global_callbacks:
+        for cb in global_callbacks:
             try:
                 cb(event)
-            except Exception:
+            except (TypeError, ValueError, RuntimeError):
                 pass
 
         return event
@@ -461,9 +472,10 @@ class SubagentMonitor:
             task=task,
             started_at=datetime.now(),
         )
-        self.active_subagents[exec_id] = execution
+        with self._lock:
+            self.active_subagents[exec_id] = execution
 
-        # Emit STARTED event
+        # Emit STARTED event (callbacks invoked outside lock)
         self._emit_event(
             SubagentEventType.STARTED,
             exec_id,
@@ -479,17 +491,21 @@ class SubagentMonitor:
         Args:
             execution_id: The execution to update.
         """
-        if execution_id in self.active_subagents:
+        with self._lock:
+            if execution_id not in self.active_subagents:
+                return
             execution = self.active_subagents[execution_id]
             execution.turns += 1
+            turn_number = execution.turns
+            subagent_type = execution.subagent_type
 
-            # Emit TURN_COMPLETED event
-            self._emit_event(
-                SubagentEventType.TURN_COMPLETED,
-                execution_id,
-                execution.subagent_type,
-                {"turn_number": execution.turns},
-            )
+        # Emit TURN_COMPLETED event (outside lock)
+        self._emit_event(
+            SubagentEventType.TURN_COMPLETED,
+            execution_id,
+            subagent_type,
+            {"turn_number": turn_number},
+        )
 
     def record_tool_call(
         self,
@@ -506,7 +522,9 @@ class SubagentMonitor:
             args: Arguments passed to the tool.
             result: Result returned by the tool.
         """
-        if execution_id in self.active_subagents:
+        with self._lock:
+            if execution_id not in self.active_subagents:
+                return
             execution = self.active_subagents[execution_id]
             tool_call_record = {
                 "tool": tool_name,
@@ -515,14 +533,15 @@ class SubagentMonitor:
                 "timestamp": datetime.now().isoformat(),
             }
             execution.tool_calls.append(tool_call_record)
+            subagent_type = execution.subagent_type
 
-            # Emit TOOL_CALLED event
-            self._emit_event(
-                SubagentEventType.TOOL_CALLED,
-                execution_id,
-                execution.subagent_type,
-                {"tool_name": tool_name, "args": args},
-            )
+        # Emit TOOL_CALLED event (outside lock)
+        self._emit_event(
+            SubagentEventType.TOOL_CALLED,
+            execution_id,
+            subagent_type,
+            {"tool_name": tool_name, "args": args},
+        )
 
     def record_tokens(self, execution_id: str, tokens: int) -> None:
         """Record tokens used by the subagent.
@@ -531,8 +550,9 @@ class SubagentMonitor:
             execution_id: The execution to update.
             tokens: Number of tokens to add.
         """
-        if execution_id in self.active_subagents:
-            self.active_subagents[execution_id].tokens_used += tokens
+        with self._lock:
+            if execution_id in self.active_subagents:
+                self.active_subagents[execution_id].tokens_used += tokens
 
     def end_execution(
         self,
@@ -554,21 +574,32 @@ class SubagentMonitor:
         Returns:
             The completed SubagentExecution, or None if not found.
         """
-        if execution_id not in self.active_subagents:
-            return None
+        with self._lock:
+            if execution_id not in self.active_subagents:
+                return None
 
-        execution = self.active_subagents.pop(execution_id)
-        execution.ended_at = datetime.now()
-        execution.result = result
-        execution.error = error
-        execution.tokens_used += tokens_used
+            execution = self.active_subagents[execution_id]
+            execution.ended_at = datetime.now()
+            execution.result = result
+            execution.error = error
+            execution.tokens_used += tokens_used
 
-        self.executions.append(execution)
-        # Trim history if needed
-        if len(self.executions) > self.max_history:
-            self.executions = self.executions[-self.max_history:]
+            # Append to history BEFORE removing from active to prevent data loss
+            self.executions.append(execution)
+            # Trim history if needed
+            if len(self.executions) > self.max_history:
+                self.executions = self.executions[-self.max_history:]
 
-        # Emit appropriate lifecycle event
+            subagent_type = execution.subagent_type
+            emit_data = {
+                "result": result[:200] if result else None,
+                "error": error,
+                "duration_seconds": execution.duration_seconds,
+                "tokens_used": execution.tokens_used,
+                "turns": execution.turns,
+            }
+
+        # Determine event type outside lock (immutable data)
         if timeout:
             event_type = SubagentEventType.TIMEOUT
         elif error:
@@ -576,22 +607,22 @@ class SubagentMonitor:
         else:
             event_type = SubagentEventType.COMPLETED
 
+        # Emit event outside lock (callbacks may re-enter)
         self._emit_event(
             event_type,
             execution_id,
-            execution.subagent_type,
-            {
-                "result": result[:200] if result else None,
-                "error": error,
-                "duration_seconds": execution.duration_seconds,
-                "tokens_used": execution.tokens_used,
-                "turns": execution.turns,
-            },
+            subagent_type,
+            emit_data,
         )
 
-        # Auto-persist if enabled
-        if self.auto_persist:
-            self.save_to_disk()
+        try:
+            # Auto-persist if enabled
+            if self.auto_persist:
+                self.save_to_disk()
+        finally:
+            # Remove from active only after save attempt completes
+            with self._lock:
+                self.active_subagents.pop(execution_id, None)
 
         return execution
 
@@ -604,14 +635,15 @@ class SubagentMonitor:
         Returns:
             The execution if found, None otherwise.
         """
-        # Check active first
-        if execution_id in self.active_subagents:
-            return self.active_subagents[execution_id]
-        # Check completed
-        for execution in self.executions:
-            if execution.id == execution_id:
-                return execution
-        return None
+        with self._lock:
+            # Check active first
+            if execution_id in self.active_subagents:
+                return self.active_subagents[execution_id]
+            # Check completed
+            for execution in self.executions:
+                if execution.id == execution_id:
+                    return execution
+            return None
 
     def get_active_count(self) -> int:
         """Get number of active subagents.
@@ -619,7 +651,8 @@ class SubagentMonitor:
         Returns:
             Number of currently running subagents.
         """
-        return len(self.active_subagents)
+        with self._lock:
+            return len(self.active_subagents)
 
     def get_active_executions(self) -> list[SubagentExecution]:
         """Get all active subagent executions.
@@ -627,7 +660,8 @@ class SubagentMonitor:
         Returns:
             List of currently running executions.
         """
-        return list(self.active_subagents.values())
+        with self._lock:
+            return list(self.active_subagents.values())
 
     def get_recent_executions(self, limit: int = 10) -> list[SubagentExecution]:
         """Get recent completed executions.
@@ -638,7 +672,8 @@ class SubagentMonitor:
         Returns:
             List of recent completed executions (newest first).
         """
-        return list(reversed(self.executions[-limit:]))
+        with self._lock:
+            return list(reversed(self.executions[-limit:]))
 
     def get_statistics(self) -> dict[str, Any]:
         """Get execution statistics.
@@ -646,39 +681,36 @@ class SubagentMonitor:
         Returns:
             Dictionary with execution statistics.
         """
-        if not self.executions:
-            return {
-                "total_executions": 0,
-                "active_count": self.get_active_count(),
-            }
+        with self._lock:
+            if not self.executions:
+                return {
+                    "total_executions": 0,
+                    "active_count": len(self.active_subagents),
+                }
 
-        successful = [e for e in self.executions if e.is_success]
-        failed = [e for e in self.executions if e.error is not None]
-        durations = [e.duration_seconds for e in self.executions if e.duration_seconds]
+            executions_snapshot = list(self.executions)
+            active_count = len(self.active_subagents)
+
+        successful = [e for e in executions_snapshot if e.is_success]
+        failed = [e for e in executions_snapshot if e.error is not None]
+        durations = [e.duration_seconds for e in executions_snapshot if e.duration_seconds]
+
+        counts: dict[str, int] = {}
+        for e in executions_snapshot:
+            counts[e.subagent_type] = counts.get(e.subagent_type, 0) + 1
 
         return {
-            "total_executions": len(self.executions),
+            "total_executions": len(executions_snapshot),
             "successful": len(successful),
             "failed": len(failed),
-            "success_rate": len(successful) / len(self.executions) if self.executions else 0,
-            "active_count": self.get_active_count(),
+            "success_rate": len(successful) / len(executions_snapshot) if executions_snapshot else 0,
+            "active_count": active_count,
             "avg_duration_seconds": sum(durations) / len(durations) if durations else 0,
-            "total_tokens": sum(e.tokens_used for e in self.executions),
-            "avg_turns": sum(e.turns for e in self.executions) / len(self.executions),
-            "avg_tool_calls": sum(len(e.tool_calls) for e in self.executions) / len(self.executions),
-            "by_type": self._count_by_type(),
+            "total_tokens": sum(e.tokens_used for e in executions_snapshot),
+            "avg_turns": sum(e.turns for e in executions_snapshot) / len(executions_snapshot),
+            "avg_tool_calls": sum(len(e.tool_calls) for e in executions_snapshot) / len(executions_snapshot),
+            "by_type": counts,
         }
-
-    def _count_by_type(self) -> dict[str, int]:
-        """Count executions by subagent type.
-
-        Returns:
-            Dictionary mapping subagent type to count.
-        """
-        counts: dict[str, int] = {}
-        for e in self.executions:
-            counts[e.subagent_type] = counts.get(e.subagent_type, 0) + 1
-        return counts
 
     def clear_history(self) -> int:
         """Clear completed execution history.
@@ -686,8 +718,9 @@ class SubagentMonitor:
         Returns:
             Number of executions cleared.
         """
-        count = len(self.executions)
-        self.executions.clear()
+        with self._lock:
+            count = len(self.executions)
+            self.executions.clear()
         if self.auto_persist:
             self.save_to_disk()
         return count
@@ -721,7 +754,7 @@ class SubagentMonitor:
             temp_path.replace(self.persistence_path)
 
             return True
-        except Exception:
+        except (OSError, TypeError, ValueError):
             return False
 
     def load_from_disk(self) -> int:
@@ -761,7 +794,7 @@ class SubagentMonitor:
 
             self.executions = loaded_executions[-self.max_history:]
             return len(self.executions)
-        except Exception:
+        except (OSError, KeyError, ValueError):
             return 0
 
     def delete_persistence_file(self) -> bool:
@@ -774,7 +807,7 @@ class SubagentMonitor:
             if self.persistence_path.exists():
                 self.persistence_path.unlink()
             return True
-        except Exception:
+        except OSError:
             return False
 
 
@@ -910,10 +943,17 @@ class AnnounceQueue:
         """
         with self._lock:
             if topic is None:
-                for subscribers in self._subscriptions.values():
+                empty_topics = []
+                for t, subscribers in self._subscriptions.items():
                     subscribers.discard(session_id)
+                    if not subscribers:
+                        empty_topics.append(t)
+                for t in empty_topics:
+                    del self._subscriptions[t]
             else:
                 self._subscriptions[topic].discard(session_id)
+                if not self._subscriptions[topic]:
+                    del self._subscriptions[topic]
 
     def poll(
         self,
@@ -1149,6 +1189,10 @@ class CrossSessionBus:
 
             # Trim if over limit
             if len(mailbox) > self.max_messages_per_session:
+                dropped = len(mailbox) - self.max_messages_per_session
+                logger.warning(
+                    f"CrossSessionBus: mailbox for {to_session} overflow, dropping {dropped} oldest message(s)"
+                )
                 self._mailboxes[to_session] = mailbox[-self.max_messages_per_session:]
 
         return message
@@ -1183,6 +1227,10 @@ class CrossSessionBus:
 
             # Trim broadcasts
             if len(self._broadcast_messages) > self.max_messages_per_session:
+                dropped = len(self._broadcast_messages) - self.max_messages_per_session
+                logger.warning(
+                    f"CrossSessionBus: broadcast overflow, dropping {dropped} oldest message(s)"
+                )
                 self._broadcast_messages = self._broadcast_messages[
                     -self.max_messages_per_session:
                 ]
@@ -1208,10 +1256,17 @@ class CrossSessionBus:
         """
         with self._lock:
             if topic is None:
-                for subscribers in self._topic_subscriptions.values():
+                empty_topics = []
+                for t, subscribers in self._topic_subscriptions.items():
                     subscribers.discard(session_id)
+                    if not subscribers:
+                        empty_topics.append(t)
+                for t in empty_topics:
+                    del self._topic_subscriptions[t]
             else:
                 self._topic_subscriptions[topic].discard(session_id)
+                if not self._topic_subscriptions[topic]:
+                    del self._topic_subscriptions[topic]
 
     def get_messages(
         self,
@@ -1616,6 +1671,9 @@ _global_cross_session_bus: CrossSessionBus | None = None
 # Global delivery tracker
 _global_delivery_tracker: DeliveryTracker | None = None
 
+# Lock for thread-safe singleton creation
+_global_singleton_lock = threading.Lock()
+
 
 def get_announce_queue() -> AnnounceQueue:
     """Get or create the global announce queue.
@@ -1625,7 +1683,9 @@ def get_announce_queue() -> AnnounceQueue:
     """
     global _global_announce_queue
     if _global_announce_queue is None:
-        _global_announce_queue = AnnounceQueue()
+        with _global_singleton_lock:
+            if _global_announce_queue is None:
+                _global_announce_queue = AnnounceQueue()
     return _global_announce_queue
 
 
@@ -1637,7 +1697,9 @@ def get_cross_session_bus() -> CrossSessionBus:
     """
     global _global_cross_session_bus
     if _global_cross_session_bus is None:
-        _global_cross_session_bus = CrossSessionBus()
+        with _global_singleton_lock:
+            if _global_cross_session_bus is None:
+                _global_cross_session_bus = CrossSessionBus()
     return _global_cross_session_bus
 
 
@@ -1649,13 +1711,16 @@ def get_delivery_tracker() -> DeliveryTracker:
     """
     global _global_delivery_tracker
     if _global_delivery_tracker is None:
-        _global_delivery_tracker = DeliveryTracker()
+        with _global_singleton_lock:
+            if _global_delivery_tracker is None:
+                _global_delivery_tracker = DeliveryTracker()
     return _global_delivery_tracker
 
 
 def reset_global_instances() -> None:
     """Reset all global instances. Useful for testing."""
     global _global_announce_queue, _global_cross_session_bus, _global_delivery_tracker
-    _global_announce_queue = None
-    _global_cross_session_bus = None
-    _global_delivery_tracker = None
+    with _global_singleton_lock:
+        _global_announce_queue = None
+        _global_cross_session_bus = None
+        _global_delivery_tracker = None

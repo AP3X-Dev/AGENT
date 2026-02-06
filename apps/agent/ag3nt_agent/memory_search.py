@@ -29,6 +29,7 @@ import json
 import logging
 import math
 import os
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -506,7 +507,11 @@ class MemoryVectorStore:
                 logger.warning(f"Failed to load existing index: {e}")
 
         # Rebuild index
-        self._rebuild_index(memory_files, current_hash)
+        try:
+            self._rebuild_index(memory_files, current_hash)
+        except ImportError as e:
+            logger.warning("Memory indexing unavailable (missing dependency): %s", e)
+            return False
         return self._index is not None
 
     def _load_index(self):
@@ -895,13 +900,16 @@ class MemoryVectorStore:
 
 # Singleton instance
 _memory_store: MemoryVectorStore | None = None
+_memory_store_lock = threading.Lock()
 
 
 def _get_memory_store() -> MemoryVectorStore:
     """Get or create the singleton memory store."""
     global _memory_store
     if _memory_store is None:
-        _memory_store = MemoryVectorStore()
+        with _memory_store_lock:
+            if _memory_store is None:
+                _memory_store = MemoryVectorStore()
     return _memory_store
 
 
@@ -912,7 +920,8 @@ def reset_memory_store() -> None:
     significant memory file changes.
     """
     global _memory_store
-    _memory_store = None
+    with _memory_store_lock:
+        _memory_store = None
 
 
 def get_memory_store_info() -> dict:

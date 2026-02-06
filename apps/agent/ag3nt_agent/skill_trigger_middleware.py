@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -113,14 +114,18 @@ def match_triggers(user_message: str, triggers_map: dict[str, list[str]]) -> lis
 class SkillTriggerMiddleware(AgentMiddleware):
     """Middleware that suggests skills based on trigger matching."""
     
-    def __init__(self):
+    def __init__(self, planning_middleware=None):
         super().__init__()
         self._triggers_map: dict[str, list[str]] | None = None
-    
+        self._planning_middleware = planning_middleware
+        self._triggers_lock = threading.Lock()
+
     def _load_triggers(self) -> dict[str, list[str]]:
-        """Load triggers lazily."""
+        """Load triggers lazily with double-checked locking."""
         if self._triggers_map is None:
-            self._triggers_map = load_skill_triggers()
+            with self._triggers_lock:
+                if self._triggers_map is None:
+                    self._triggers_map = load_skill_triggers()
         return self._triggers_map
     
     def wrap_model_call(
@@ -129,13 +134,22 @@ class SkillTriggerMiddleware(AgentMiddleware):
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelResponse:
         """Inject skill suggestions based on trigger matching."""
+        # Skip skill suggestions during planning phase
+        if self._planning_middleware is not None:
+            config = getattr(request, 'config', {}) or {}
+            configurable = config.get("configurable", {})
+            thread_id = configurable.get("thread_id", "default")
+            plan_state = self._planning_middleware.get_state(thread_id)
+            if plan_state and plan_state.enabled and plan_state.planning_phase:
+                return handler(request)
+
         # Get the last user message
         last_user_message = None
         for msg in reversed(request.messages):
             if isinstance(msg, HumanMessage):
                 last_user_message = msg.content
                 break
-        
+
         if not last_user_message or not isinstance(last_user_message, str):
             return handler(request)
         
@@ -166,6 +180,15 @@ class SkillTriggerMiddleware(AgentMiddleware):
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelResponse:
         """Inject skill suggestions based on trigger matching (async version)."""
+        # Skip skill suggestions during planning phase
+        if self._planning_middleware is not None:
+            config = getattr(request, 'config', {}) or {}
+            configurable = config.get("configurable", {})
+            thread_id = configurable.get("thread_id", "default")
+            plan_state = self._planning_middleware.get_state(thread_id)
+            if plan_state and plan_state.enabled and plan_state.planning_phase:
+                return await handler(request)
+
         # Get the last user message
         last_user_message = None
         for msg in reversed(request.messages):
