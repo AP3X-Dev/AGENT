@@ -30,6 +30,12 @@ export interface ChannelMessage {
   metadata?: Record<string, unknown>;
   /** For reply threading (original message ID) */
   replyTo?: string;
+  /** Whether this message is a reply to another message */
+  isReply?: boolean;
+  /** ID of the message being replied to */
+  replyToMessageId?: string;
+  /** User/bot IDs mentioned in this message */
+  mentions?: string[];
 }
 
 /**
@@ -124,15 +130,46 @@ export interface ChannelAdapterConfig {
 export type DMPolicy = "open" | "pairing";
 
 /**
+ * Activation mode for controlling when the bot responds.
+ */
+export type ActivationMode = 'always' | 'mention' | 'reply' | 'keyword' | 'off';
+
+/**
+ * Bot identity information for activation checking.
+ */
+export interface BotInfo {
+  id: string;
+  username: string;
+  displayName: string;
+}
+
+/**
+ * Result of an activation check.
+ */
+export interface ActivationResult {
+  shouldActivate: boolean;
+  reason: string;
+  matchedRule: string;
+}
+
+/**
  * Generate a session ID from channel and chat info.
  * Session IDs are used for agent context isolation.
  */
+function escapeColon(s: string): string {
+  return s.replace(/%/g, '%25').replace(/:/g, '%3A');
+}
+
+function unescapeColon(s: string): string {
+  return s.replace(/%3A/g, ':').replace(/%25/g, '%');
+}
+
 export function generateSessionId(
   channelType: string,
   channelId: string,
   chatId: string
 ): string {
-  return `${channelType}:${channelId}:${chatId}`;
+  return `${escapeColon(channelType)}:${escapeColon(channelId)}:${escapeColon(chatId)}`;
 }
 
 /**
@@ -146,9 +183,9 @@ export function parseSessionId(sessionId: string): {
   const parts = sessionId.split(":");
   if (parts.length < 3) return null;
   return {
-    channelType: parts[0],
-    channelId: parts[1],
-    chatId: parts.slice(2).join(":"), // chatId may contain colons
+    channelType: unescapeColon(parts[0]),
+    channelId: unescapeColon(parts[1]),
+    chatId: unescapeColon(parts.slice(2).join(":")),
   };
 }
 

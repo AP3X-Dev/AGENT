@@ -172,7 +172,10 @@ describe('Router', () => {
         'http://127.0.0.1:18790/turn',
         expect.objectContaining({
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: expect.objectContaining({
+            'Content-Type': 'application/json',
+            'Connection': 'keep-alive',
+          }),
         })
       );
     });
@@ -200,7 +203,7 @@ describe('Router', () => {
     });
 
     it('should handle network error', async () => {
-      (global.fetch as any).mockRejectedValueOnce(new Error('Network error'));
+      (global.fetch as any).mockRejectedValue(new Error('Network error'));
 
       const message: ChannelMessage = {
         channelType: 'telegram',

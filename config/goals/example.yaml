@@ -1,0 +1,90 @@
+# Example AG3NT Autonomous System Goals
+#
+# This file defines event-driven goals for the autonomous system.
+# Goals are triggered by events and execute actions based on confidence.
+#
+# Enable with: AG3NT_AUTONOMOUS_ENABLED=true
+
+settings:
+  emergency_stop: false
+  default_confidence_threshold: 0.75
+  global_limits:
+    max_concurrent_actions: 3
+    max_actions_per_minute: 10
+
+goals:
+  # Example: Notify on high-severity log entries
+  - id: log-alert
+    name: Log Alert Notification
+    description: Send notification when error logs are detected
+    trigger:
+      event_type: log_pattern
+      filter:
+        severity: "regex:error|critical"
+      cooldown_seconds: 300
+    action:
+      type: notify
+      channel: default
+      message: "Log alert: {{ event['payload']['message'] }}"
+      timeout_seconds: 10
+    risk_level: low
+    confidence_threshold: 0.5
+    requires_approval: false
+    limits:
+      max_executions_per_hour: 20
+      max_executions_per_day: 100
+    tags: [monitoring, logs]
+    enabled: true
+
+  # Example: Auto-restart service on health check failure
+  - id: service-restart
+    name: Service Auto-Restart
+    description: Restart service when health check fails repeatedly
+    trigger:
+      event_type: http_check
+      filter:
+        status_code: "regex:5[0-9]{2}"
+      cooldown_seconds: 600
+    action:
+      type: shell
+      command: "systemctl restart {{ event['payload']['service'] }}"
+      timeout_seconds: 60
+      retry_count: 2
+      retry_delay_seconds: 10
+    risk_level: high
+    confidence_threshold: 0.9
+    requires_approval: true  # Always ask before restarting services
+    limits:
+      max_executions_per_hour: 3
+      max_executions_per_day: 10
+    tags: [infrastructure, auto-healing]
+    enabled: false  # Disabled by default - enable with caution
+
+  # Example: Agent-driven incident response
+  - id: incident-response
+    name: Incident Response Agent
+    description: Delegate incident analysis to the AI agent
+    trigger:
+      event_type: incident
+      filter:
+        priority: "regex:P1|P2"
+      cooldown_seconds: 60
+    action:
+      type: agent
+      agent_prompt: |
+        An incident has been reported:
+        - Type: {{ event['type'] }}
+        - Source: {{ event['source'] }}
+        - Details: {{ event['payload'] }}
+
+        Please analyze this incident and suggest remediation steps.
+        Do NOT execute any commands - only provide analysis.
+      timeout_seconds: 120
+    risk_level: medium
+    confidence_threshold: 0.75
+    requires_approval: false
+    limits:
+      max_executions_per_hour: 10
+      max_executions_per_day: 50
+    tags: [incidents, ai-driven]
+    enabled: true

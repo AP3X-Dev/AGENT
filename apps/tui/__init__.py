@@ -1,6 +1,11 @@
-"""AG3NT TUI - Terminal User Interface for AG3NT."""
+"""AG3NT TUI - Terminal User Interface for AG3NT.
 
-from .ag3nt_tui import AG3NTApp, main
+A high-quality terminal interface for AG3NT with streaming support,
+tool visualization, and real-time updates.
+"""
 
-__all__ = ["AG3NTApp", "main"]
+from .app import AG3NTApp, main
+from .config import VERSION
 
+__version__ = VERSION
+__all__ = ["AG3NTApp", "main", "VERSION"]

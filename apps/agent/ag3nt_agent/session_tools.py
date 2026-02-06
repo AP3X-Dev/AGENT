@@ -5,10 +5,16 @@ Sessions represent channel+user combinations with message history.
 """
 from __future__ import annotations
 
+import asyncio
+import logging
 import httpx
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal, Any
+
+from langchain_core.tools import tool
+
+logger = logging.getLogger("ag3nt.tools.sessions")
 
 
 @dataclass
@@ -371,4 +377,106 @@ def create_send_message_tool(gateway_url: str = "http://localhost:18789"):
             return f"Error sending message: {e}"
 
     return send_message_to_session
+
+
+# =============================================================================
+# LangChain @tool wrappers
+# =============================================================================
+
+def _get_gateway_url() -> str:
+    """Get the gateway URL from environment or default."""
+    import os
+    return os.environ.get("AG3NT_GATEWAY_URL", "http://localhost:18789")
+
+
+def _run_async(coro):
+    """Run an async coroutine synchronously."""
+    try:
+        loop = asyncio.get_running_loop()
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(asyncio.run, coro)
+            return future.result(timeout=30)
+    except RuntimeError:
+        return asyncio.run(coro)
+
+
+@tool
+def sessions_list(channel_type: str | None = None) -> str:
+    """List active sessions across all channels.
+
+    Shows session IDs, channel types, user names, message counts, and pairing status.
+
+    Args:
+        channel_type: Optional filter by channel type (e.g. "telegram", "discord", "cli").
+    """
+    try:
+        st = SessionTools(_get_gateway_url())
+        sessions = _run_async(st.list_sessions(channel_type=channel_type))
+        if not sessions:
+            return "No active sessions found."
+
+        lines = [f"Found {len(sessions)} session(s):\n"]
+        for s in sessions:
+            name = s.user_name or s.user_id
+            lines.append(
+                f"- **{s.id}** ({s.channel_type}) | user: {name} | "
+                f"messages: {s.message_count} | paired: {s.paired}"
+            )
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error listing sessions: {e}"
+
+
+@tool
+def sessions_history(session_id: str, limit: int = 20) -> str:
+    """Get message history for a specific session.
+
+    Args:
+        session_id: The session ID to get history for.
+        limit: Maximum number of messages to return (default: 20).
+    """
+    try:
+        st = SessionTools(_get_gateway_url())
+        messages = _run_async(st.get_history(session_id, limit=limit))
+        if not messages:
+            return f"No messages found for session {session_id}."
+
+        lines = [f"Last {len(messages)} message(s) for session **{session_id}**:\n"]
+        for m in messages:
+            preview = m.content[:200] + "..." if len(m.content) > 200 else m.content
+            ts = m.timestamp.strftime("%H:%M:%S")
+            lines.append(f"[{ts}] **{m.role}**: {preview}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error getting session history: {e}"
+
+
+@tool
+def sessions_send(session_id: str, content: str) -> str:
+    """Send a message to another session (cross-session communication).
+
+    This allows the agent to communicate with users on other channels or sessions.
+
+    Args:
+        session_id: The target session ID to send the message to.
+        content: The message content to send.
+    """
+    try:
+        st = SessionTools(_get_gateway_url())
+        result = _run_async(st.send_message(session_id, content))
+        if result.success:
+            return f"Message sent to session {session_id}."
+        return f"Failed to send message: {result.error}"
+    except Exception as e:
+        return f"Error sending message: {e}"
+
+
+def get_session_tools() -> list:
+    """Get all session management LangChain tools for the agent.
+
+    Returns:
+        List of @tool decorated session functions.
+    """
+    return [sessions_list, sessions_history, sessions_send]
 

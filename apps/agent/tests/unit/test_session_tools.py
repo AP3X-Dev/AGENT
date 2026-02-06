@@ -14,6 +14,10 @@ from ag3nt_agent.session_tools import (
     create_list_sessions_tool,
     create_get_session_history_tool,
     create_send_message_tool,
+    get_session_tools,
+    sessions_list,
+    sessions_history,
+    sessions_send,
 )
 
 
@@ -342,4 +346,118 @@ class TestToolFactories:
 
         assert callable(tool)
         assert tool.__doc__ is not None
+
+
+# ============================================================================
+# @tool Wrapper Tests
+# ============================================================================
+
+
+class TestGetSessionTools:
+    """Tests for get_session_tools() factory function."""
+
+    def test_returns_list(self):
+        """Test that get_session_tools returns a list."""
+        tools = get_session_tools()
+        assert isinstance(tools, list)
+
+    def test_returns_three_tools(self):
+        """Test that get_session_tools returns exactly 3 tools."""
+        tools = get_session_tools()
+        assert len(tools) == 3
+
+    def test_tool_names(self):
+        """Test that all expected tools are present."""
+        tools = get_session_tools()
+        tool_names = {t.name for t in tools}
+        expected = {"sessions_list", "sessions_history", "sessions_send"}
+        assert tool_names == expected
+
+    def test_tools_have_descriptions(self):
+        """Test that all tools have descriptions."""
+        tools = get_session_tools()
+        for t in tools:
+            assert t.description, f"Tool {t.name} has no description"
+
+
+class TestSessionToolWrappers:
+    """Tests for @tool decorated session wrapper functions."""
+
+    @patch("ag3nt_agent.session_tools._run_async")
+    def test_sessions_list_empty(self, mock_async):
+        """Test sessions_list with no sessions."""
+        mock_async.return_value = []
+        result = sessions_list.invoke({})
+        assert "No active sessions found" in result
+
+    @patch("ag3nt_agent.session_tools._run_async")
+    def test_sessions_list_with_results(self, mock_async):
+        """Test sessions_list with sessions."""
+        mock_async.return_value = [
+            SessionInfo(
+                id="test:1:1",
+                channel_type="telegram",
+                channel_id="bot-1",
+                chat_id="chat-1",
+                user_id="user-1",
+                user_name="Alice",
+                created_at=datetime(2024, 1, 15, tzinfo=timezone.utc),
+                last_activity_at=datetime(2024, 1, 15, tzinfo=timezone.utc),
+                paired=True,
+                message_count=10,
+            ),
+        ]
+        result = sessions_list.invoke({})
+        assert "1 session(s)" in result
+        assert "Alice" in result
+        assert "telegram" in result
+
+    @patch("ag3nt_agent.session_tools._run_async")
+    def test_sessions_list_error(self, mock_async):
+        """Test sessions_list handles errors gracefully."""
+        mock_async.side_effect = Exception("Connection refused")
+        result = sessions_list.invoke({})
+        assert "Error" in result
+
+    @patch("ag3nt_agent.session_tools._run_async")
+    def test_sessions_history_empty(self, mock_async):
+        """Test sessions_history with no messages."""
+        mock_async.return_value = []
+        result = sessions_history.invoke({"session_id": "test:1:1"})
+        assert "No messages found" in result
+
+    @patch("ag3nt_agent.session_tools._run_async")
+    def test_sessions_history_with_messages(self, mock_async):
+        """Test sessions_history with messages."""
+        mock_async.return_value = [
+            Message(
+                id="msg-1",
+                role="user",
+                content="Hello there!",
+                timestamp=datetime(2024, 1, 15, 10, 30, 0, tzinfo=timezone.utc),
+            ),
+            Message(
+                id="msg-2",
+                role="assistant",
+                content="Hi! How can I help?",
+                timestamp=datetime(2024, 1, 15, 10, 30, 5, tzinfo=timezone.utc),
+            ),
+        ]
+        result = sessions_history.invoke({"session_id": "test:1:1"})
+        assert "2 message(s)" in result
+        assert "Hello there!" in result
+
+    @patch("ag3nt_agent.session_tools._run_async")
+    def test_sessions_send_success(self, mock_async):
+        """Test sessions_send success."""
+        mock_async.return_value = SessionToolsResult(success=True)
+        result = sessions_send.invoke({"session_id": "test:1:1", "content": "Hello"})
+        assert "Message sent" in result
+
+    @patch("ag3nt_agent.session_tools._run_async")
+    def test_sessions_send_failure(self, mock_async):
+        """Test sessions_send failure."""
+        mock_async.return_value = SessionToolsResult(success=False, error="Session not found")
+        result = sessions_send.invoke({"session_id": "bad-id", "content": "Hello"})
+        assert "Failed" in result
 

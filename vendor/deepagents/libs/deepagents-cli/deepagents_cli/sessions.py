@@ -204,6 +204,101 @@ async def list_threads_command(
     console.print()
 
 
+async def get_thread_messages(
+    thread_id: str,
+    limit: int = 50,
+) -> list[dict]:
+    """Get messages from a thread's checkpoint.
+
+    Returns a list of message dicts with 'role', 'content', and 'id' keys.
+    """
+    db_path = str(get_db_path())
+    async with aiosqlite.connect(db_path, timeout=30.0) as conn:
+        if not await _table_exists(conn, "checkpoints"):
+            return []
+
+        # Get the latest checkpoint for this thread
+        query = """
+            SELECT checkpoint
+            FROM checkpoints
+            WHERE thread_id = ?
+            ORDER BY checkpoint_id DESC
+            LIMIT 1
+        """
+        async with conn.execute(query, (thread_id,)) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return []
+
+            try:
+                import json
+                checkpoint_blob = row[0]
+                # The checkpoint is stored as JSON or msgpack
+                if isinstance(checkpoint_blob, bytes):
+                    try:
+                        # Try JSON first
+                        checkpoint = json.loads(checkpoint_blob.decode('utf-8'))
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        # Try msgpack/ormsgpack
+                        try:
+                            import ormsgpack
+                            checkpoint = ormsgpack.unpackb(checkpoint_blob)
+                        except Exception:
+                            return []
+                elif isinstance(checkpoint_blob, str):
+                    checkpoint = json.loads(checkpoint_blob)
+                else:
+                    return []
+
+                # Extract messages from channel_values
+                channel_values = checkpoint.get("channel_values", {})
+                messages_data = channel_values.get("messages", [])
+
+                messages = []
+                for msg in messages_data[-limit:]:
+                    if isinstance(msg, dict):
+                        role = msg.get("type", "unknown")
+                        content = msg.get("content", "")
+                        msg_id = msg.get("id", "")
+                    else:
+                        # Handle LangChain message objects serialized differently
+                        role = getattr(msg, "type", "unknown")
+                        content = getattr(msg, "content", str(msg))
+                        msg_id = getattr(msg, "id", "")
+
+                    # Normalize role names
+                    if role in ("human", "HumanMessage"):
+                        role = "user"
+                    elif role in ("ai", "AIMessage"):
+                        role = "assistant"
+
+                    messages.append({
+                        "role": role,
+                        "content": content if isinstance(content, str) else str(content),
+                        "id": msg_id,
+                    })
+
+                return messages
+            except Exception:
+                return []
+
+
+async def get_thread_preview(thread_id: str, max_length: int = 60) -> str | None:
+    """Get a preview of the thread's last message content."""
+    messages = await get_thread_messages(thread_id, limit=5)
+    if not messages:
+        return None
+
+    # Get the last user or assistant message
+    for msg in reversed(messages):
+        if msg["role"] in ("user", "assistant"):
+            content = msg["content"]
+            if len(content) > max_length:
+                return content[:max_length] + "..."
+            return content
+    return None
+
+
 async def delete_thread_command(thread_id: str) -> None:
     """CLI handler for: deepagents threads delete."""
     deleted = await delete_thread(thread_id)

@@ -31,6 +31,12 @@ from ag3nt_agent.shell_security import (
     ValidationResult,
 )
 
+try:
+    from ag3nt_agent.exec_approval import ExecApprovalEvaluator
+    _EXEC_APPROVAL_AVAILABLE = True
+except ImportError:
+    _EXEC_APPROVAL_AVAILABLE = False
+
 
 @dataclass(frozen=True)
 class ShellResult:
@@ -227,6 +233,25 @@ class ShellMiddleware(AgentMiddleware[AgentState, Any]):
             ShellResult with detailed execution information.
         """
         start_time = time.perf_counter()
+
+        # Exec approval evaluation (granular allow/deny)
+        if _EXEC_APPROVAL_AVAILABLE:
+            try:
+                evaluator = ExecApprovalEvaluator.get_instance()
+                approval = evaluator.evaluate(command)
+                if approval.decision == "deny":
+                    return ShellResult(
+                        stdout="",
+                        stderr="",
+                        exit_code=-1,
+                        duration=time.perf_counter() - start_time,
+                        truncated=False,
+                        command=command,
+                        security_blocked=True,
+                        security_reason=f"Exec policy denied: {approval.reason}",
+                    )
+            except Exception:
+                pass  # Fall through to existing security validation
 
         # Security validation
         security_result = self._security_validator.validate(command)

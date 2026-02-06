@@ -126,6 +126,8 @@ export const ConfigSchema = z.object({
     defaultDMPolicy: DMPolicySchema,
     /** Pre-approved session patterns (e.g., 'telegram:*:12345') */
     allowlist: z.array(z.string()).default([]),
+    /** YOLO mode: full autonomous operation with no approval gates */
+    yoloMode: z.boolean().default(false),
   }),
   channels: z.object({
     /** List of enabled channel types */
@@ -172,6 +174,18 @@ export const ConfigSchema = z.object({
       )
       .default([]),
   }),
+  routing: z.object({
+    strategy: z.enum(['auto', 'explicit', 'round-robin']).default('auto'),
+    defaultAgent: z.string().default(''),
+    queueEnabled: z.boolean().default(true),
+    queueIntervalMs: z.number().default(100),
+    maxQueueSize: z.number().default(1000),
+  }).optional(),
+  quotas: z.object({
+    defaultMaxTurnsPerHour: z.number().default(60),
+    defaultMaxTokensPerTurn: z.number().default(16000),
+    defaultMaxConcurrent: z.number().default(3),
+  }).optional(),
   nodes: z.object({
     /**
      * Additional companion nodes to expect connections from.

@@ -1,0 +1,28 @@
+{
+  "id": "example-plugin",
+  "name": "Example Plugin",
+  "description": "Demonstrates the AG3NT plugin API",
+  "version": "1.0.0",
+  "kind": "standard",
+  "tools": ["example_tool"],
+  "hooks": ["gateway_start", "message_received"],
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "greeting": {
+        "type": "string",
+        "description": "Custom greeting message"
+      },
+      "enabled": {
+        "type": "boolean",
+        "default": true
+      }
+    }
+  },
+  "uiHints": {
+    "greeting": {
+      "label": "Greeting Message",
+      "placeholder": "Hello from example plugin!"
+    }
+  }
+}

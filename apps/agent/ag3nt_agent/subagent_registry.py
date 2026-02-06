@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Literal
 
@@ -24,6 +25,18 @@ if TYPE_CHECKING:
     from ag3nt_agent.subagent_configs import SubagentConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _sanitize_enums(obj):
+    """Recursively convert Enum values to their .value for YAML serialization."""
+    if isinstance(obj, dict):
+        return {k: _sanitize_enums(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_enums(v) for v in obj]
+    if isinstance(obj, Enum):
+        return obj.value
+    return obj
+
 
 # Source types for subagent registration
 SubagentSource = Literal["builtin", "plugin", "user"]
@@ -329,8 +342,8 @@ class SubagentRegistry:
             logger.info("No subagents to save for source '%s'", source)
             return 0
 
-        # Convert to dicts for serialization
-        data = {"subagents": [asdict(c) for c in configs]}
+        # Convert to dicts for serialization (enums → plain strings)
+        data = {"subagents": [_sanitize_enums(asdict(c)) for c in configs]}
 
         # Ensure parent directory exists
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -365,7 +378,7 @@ class SubagentRegistry:
 
         try:
             import yaml
-            data = {"subagents": [asdict(config)]}
+            data = {"subagents": [_sanitize_enums(asdict(config))]}
             with open(file_path, "w", encoding="utf-8") as f:
                 yaml.dump(data, default_flow_style=False, sort_keys=False, stream=f)
             logger.info("Saved subagent config to %s", file_path)

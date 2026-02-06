@@ -7,6 +7,8 @@
 
 import crypto from "node:crypto";
 import { generateSessionId, type DMPolicy } from "../channels/types.js";
+import type { SessionStore, EnhancedSession } from "./SessionStore.js";
+import { createDefaultEnhancedSession } from "./SessionStore.js";
 
 /**
  * Session state for a channel+user combination.
@@ -48,6 +50,10 @@ export interface SessionManagerConfig {
   allowlist?: string[];
   /** Optional callback to persist allowlist changes */
   onAllowlistChange?: (allowlist: string[]) => void | Promise<void>;
+  /** Optional persistent session store */
+  sessionStore?: SessionStore;
+  /** Default quota overrides */
+  defaultQuotas?: { maxTurnsPerHour?: number; maxTokensPerTurn?: number; maxConcurrent?: number };
 }
 
 const DEFAULT_PAIRING_TTL = 10 * 60 * 1000; // 10 minutes
@@ -58,15 +64,20 @@ const DEFAULT_PAIRING_TTL = 10 * 60 * 1000; // 10 minutes
  */
 export class SessionManager {
   private sessions: Map<string, Session> = new Map();
+  private enhancedSessions: Map<string, EnhancedSession> = new Map();
   private allowlist: Set<string> = new Set();
   private dmPolicy: DMPolicy;
   private pairingCodeTTL: number;
   private onAllowlistChange?: (allowlist: string[]) => void | Promise<void>;
+  private sessionStore?: SessionStore;
+  private defaultQuotas?: SessionManagerConfig['defaultQuotas'];
 
   constructor(config: SessionManagerConfig) {
     this.dmPolicy = config.dmPolicy;
     this.pairingCodeTTL = config.pairingCodeTTL ?? DEFAULT_PAIRING_TTL;
     this.onAllowlistChange = config.onAllowlistChange;
+    this.sessionStore = config.sessionStore;
+    this.defaultQuotas = config.defaultQuotas;
     if (config.allowlist) {
       config.allowlist.forEach((pattern) => this.allowlist.add(pattern));
     }
@@ -112,6 +123,9 @@ export class SessionManager {
         paired: this.isPreApproved(sessionId, userId),
       };
       this.sessions.set(sessionId, session);
+
+      // Load or create enhanced session from persistent store
+      this.loadOrCreateEnhancedSession(sessionId, channelType, channelId, chatId);
     } else {
       // Update activity and user info
       session.lastActivityAt = new Date();
@@ -271,6 +285,10 @@ export class SessionManager {
    * Remove a session.
    */
   removeSession(sessionId: string): boolean {
+    this.enhancedSessions.delete(sessionId);
+    if (this.sessionStore) {
+      this.sessionStore.delete(sessionId);
+    }
     return this.sessions.delete(sessionId);
   }
 
@@ -283,6 +301,108 @@ export class SessionManager {
     if (!session) return false;
     session.lastActivityAt = new Date();
     return true;
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // Enhanced Session Support
+  // ─────────────────────────────────────────────────────────────────
+
+  /**
+   * Load or create an enhanced session, backed by persistent store.
+   */
+  private loadOrCreateEnhancedSession(
+    sessionId: string,
+    channelType: string,
+    channelId: string,
+    chatId: string,
+  ): EnhancedSession {
+    // Check in-memory cache first
+    const cached = this.enhancedSessions.get(sessionId);
+    if (cached) return cached;
+
+    // Try loading from persistent store
+    if (this.sessionStore) {
+      const loaded = this.sessionStore.load(sessionId);
+      if (loaded) {
+        this.enhancedSessions.set(sessionId, loaded);
+        return loaded;
+      }
+    }
+
+    // Create new enhanced session with defaults
+    const enhanced = createDefaultEnhancedSession(
+      sessionId,
+      channelType,
+      channelId,
+      chatId,
+      this.defaultQuotas,
+    );
+
+    this.enhancedSessions.set(sessionId, enhanced);
+
+    // Persist to store
+    if (this.sessionStore) {
+      this.sessionStore.save(enhanced);
+    }
+
+    return enhanced;
+  }
+
+  /**
+   * Get the enhanced session data for a session.
+   */
+  getEnhancedSession(sessionId: string): EnhancedSession | null {
+    // Check in-memory cache
+    const cached = this.enhancedSessions.get(sessionId);
+    if (cached) return cached;
+
+    // Try loading from store
+    if (this.sessionStore) {
+      const loaded = this.sessionStore.load(sessionId);
+      if (loaded) {
+        this.enhancedSessions.set(sessionId, loaded);
+        return loaded;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Update enhanced session fields.
+   */
+  updateSession(
+    sessionId: string,
+    updates: Partial<Pick<EnhancedSession, 'priority' | 'assignedAgent' | 'activationMode' | 'activationKeywords' | 'quotas' | 'metadata'>>,
+  ): EnhancedSession | null {
+    const enhanced = this.getEnhancedSession(sessionId);
+    if (!enhanced) return null;
+
+    if (updates.priority !== undefined) enhanced.priority = updates.priority;
+    if (updates.assignedAgent !== undefined) enhanced.assignedAgent = updates.assignedAgent;
+    if (updates.activationMode !== undefined) enhanced.activationMode = updates.activationMode;
+    if (updates.activationKeywords !== undefined) enhanced.activationKeywords = updates.activationKeywords;
+    if (updates.quotas !== undefined) enhanced.quotas = { ...enhanced.quotas, ...updates.quotas };
+    if (updates.metadata !== undefined) enhanced.metadata = { ...enhanced.metadata, ...updates.metadata };
+
+    enhanced.updatedAt = new Date().toISOString();
+
+    // Update in-memory cache
+    this.enhancedSessions.set(sessionId, enhanced);
+
+    // Persist to store
+    if (this.sessionStore) {
+      this.sessionStore.save(enhanced);
+    }
+
+    return enhanced;
+  }
+
+  /**
+   * Get the session store.
+   */
+  getSessionStore(): SessionStore | undefined {
+    return this.sessionStore;
   }
 }
 

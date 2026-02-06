@@ -24,15 +24,62 @@ ag3nt/
 ├── apps/
 │   ├── gateway/     # Gateway daemon (HTTP + WebSocket + channels)
 │   ├── agent/       # Agent worker (DeepAgents runtime)
+│   ├── ui/          # Web dashboard (Next.js)
 │   └── tui/         # Terminal UI client
 ├── skills/          # Bundled Agent Skills (SKILL.md format)
 ├── config/          # Default configuration templates
 └── docs/            # Planning documents
 ```
 
+## 🖥️ Web Dashboard
+
+The AP3X-UI provides a comprehensive web interface for AG3NT:
+
+### Running the UI
+
+**Windows (Unified Script - Recommended):**
+```powershell
+.\start.ps1
+```
+This starts Gateway, Agent Worker, and UI together. Access at http://localhost:3000
+
+**Manual Start:**
+```bash
+# Terminal 1: Start AG3NT Gateway
+cd apps/gateway && npm run dev
+
+# Terminal 2: Start AG3NT Agent Worker
+cd apps/agent && .venv/Scripts/activate && python -m ag3nt_agent.worker
+
+# Terminal 3: Start UI Dashboard
+cd apps/ui && npm run dev
+```
+
+Access the dashboard at http://localhost:3000
+
+### UI Features
+- Real-time chat with streaming
+- Artifact library and management
+- Skills and tools browser
+- Subagent configuration
+- MCP server manager
+- Browser automation interface
+- System monitoring and logs
+
 ## Quick Start
 
-### 1. Copy Configuration
+### Windows (One Command)
+```powershell
+# Start everything: Gateway + Agent + UI
+.\start.ps1
+
+# Stop all services
+.\stop.ps1
+```
+
+### Manual Setup
+
+#### 1. Copy Configuration
 ```bash
 # Create config directory
 mkdir -p ~/.ag3nt
@@ -41,7 +88,7 @@ mkdir -p ~/.ag3nt
 cp config/default-config.yaml ~/.ag3nt/config.yaml
 ```
 
-### 2. Start Gateway
+#### 2. Start Gateway
 ```bash
 cd apps/gateway
 pnpm install
@@ -49,7 +96,7 @@ pnpm dev
 ```
 Gateway runs on `http://127.0.0.1:18789`
 
-### 3. Start Agent Worker
+#### 3. Start Agent Worker
 ```bash
 cd apps/agent
 python -m venv .venv
@@ -65,7 +112,15 @@ python -m ag3nt_agent.worker
 ```
 Worker runs on `http://127.0.0.1:18790`
 
-### 4. Start TUI (Optional)
+#### 4. Start Web UI
+```bash
+cd apps/ui
+npm install
+npm run dev
+```
+UI runs on `http://localhost:3000`
+
+#### 5. Start TUI (Optional)
 ```bash
 cd apps/tui
 pip install -r requirements.txt
@@ -95,6 +150,7 @@ See [ROADMAP.md](docs/ROADMAP.md) for detailed sprint planning and current prior
 ## Documentation
 
 - [Agent Worker](apps/agent/README.md) - Model providers and worker API
+- [Web Dashboard](apps/ui/README.md) - Next.js web interface
 - [TUI Client](apps/tui/README.md) - Terminal interface usage
 - [Gateway API](apps/gateway/API.md) - HTTP/WebSocket API reference
 - [Control Panel](apps/gateway/src/ui/README.md) - Web-based control panel
@@ -106,7 +162,7 @@ See [ROADMAP.md](docs/ROADMAP.md) for detailed sprint planning and current prior
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `AG3NT_MODEL_PROVIDER` | LLM provider (anthropic, openai, openrouter, kimi, google) | `openrouter` |
-| `AG3NT_MODEL_NAME` | Model name | `moonshotai/kimi-k2-thinking` |
+| `AG3NT_MODEL_NAME` | Model name | `moonshotai/kimi-k2.5` |
 | `ANTHROPIC_API_KEY` | Anthropic API key | - |
 | `OPENAI_API_KEY` | OpenAI API key | - |
 | `OPENROUTER_API_KEY` | OpenRouter API key | - |

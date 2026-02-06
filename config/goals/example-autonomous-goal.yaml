@@ -1,0 +1,450 @@
+# AG3NT Autonomous Goals Configuration
+# =====================================
+#
+# This file defines autonomous goals that the agent monitors and acts upon.
+# Goals are event-driven: when a trigger event matches, the decision engine
+# evaluates whether to act autonomously or request approval.
+#
+# YAML Schema:
+#   id:                  Unique identifier (kebab-case)
+#   name:                Human-readable name
+#   description:         What this goal does
+#   trigger:             When to activate
+#   action:              What to do
+#   risk_level:          low | medium | high | critical
+#   confidence_threshold: 0.0 - 1.0 (minimum confidence to act)
+#   requires_approval:   Force human approval regardless of confidence
+#   limits:              Rate limiting
+#   tags:                Categorization
+#   owner:               Team or person responsible
+
+---
+
+# ==============================================================================
+# EXAMPLE 1: Website Health Monitor
+# ==============================================================================
+# Monitors a website and automatically restarts the service on failure.
+# This is a common DevOps automation pattern.
+
+goals:
+  - id: website-health-monitor
+    name: "Website Health Monitor"
+    description: |
+      Monitors the main website health endpoint every 60 seconds.
+      On failure, attempts automatic recovery by restarting nginx.
+      Escalates to human if recovery fails or too many incidents occur.
+
+    trigger:
+      event_type: http_check
+      filter:
+        success: false
+        url: "regex:https?://mysite\\.com.*"
+      cooldown_seconds: 300  # Don't trigger more than once per 5 minutes
+
+    action:
+      type: shell
+      command: "systemctl restart nginx && sleep 5 && curl -sf http://localhost/health"
+      timeout_seconds: 30
+      retry_count: 2
+      retry_delay_seconds: 10
+
+    risk_level: medium  # Service restart is medium risk
+    confidence_threshold: 0.75
+    requires_approval: false  # Can act autonomously once confidence is high
+
+    limits:
+      max_executions_per_hour: 3
+      max_executions_per_day: 10
+
+    tags:
+      - infrastructure
+      - critical
+      - auto-recovery
+    owner: ops-team
+
+
+# ==============================================================================
+# EXAMPLE 2: Log Error Alerter
+# ==============================================================================
+# Monitors log files for critical errors and notifies the team.
+# Notification-only goals are low risk and can run autonomously immediately.
+
+  - id: critical-error-alerter
+    name: "Critical Error Alerter"
+    description: |
+      Watches application logs for CRITICAL or FATAL errors.
+      Immediately notifies the on-call channel with error details.
+      Does not take any corrective action - humans investigate.
+
+    trigger:
+      event_type: log_pattern
+      filter:
+        severity: "regex:CRITICAL|FATAL|EMERGENCY"
+        source: "/var/log/app/*.log"
+      cooldown_seconds: 60  # Aggregate errors over 1 minute
+
+    action:
+      type: notify
+      channel: "slack:#oncall-alerts"
+      message: |
+        :rotating_light: **Critical Error Detected**
+
+        **Source:** {{ event.source }}
+        **Time:** {{ event.timestamp }}
+        **Message:** {{ event.payload.message | truncate(500) }}
+
+        Please investigate immediately.
+
+    risk_level: low  # Notification only - no system changes
+    confidence_threshold: 0.5  # Low threshold since it's just alerting
+    requires_approval: false
+
+    limits:
+      max_executions_per_hour: 20
+      max_executions_per_day: 100
+
+    tags:
+      - monitoring
+      - alerting
+    owner: dev-team
+
+
+# ==============================================================================
+# EXAMPLE 3: Database Backup Verifier
+# ==============================================================================
+# Runs after scheduled backups to verify integrity.
+# Uses the agent for intelligent analysis rather than simple shell commands.
+
+  - id: backup-verifier
+    name: "Database Backup Verifier"
+    description: |
+      Triggered after nightly backup completion.
+      Verifies backup integrity by checking file size, running pg_restore --list,
+      and comparing row counts against production.
+      Reports findings and alerts on anomalies.
+
+    trigger:
+      event_type: schedule
+      filter:
+        schedule_name: "nightly-backup"
+        status: "completed"
+      cooldown_seconds: 3600  # Only once per hour
+
+    action:
+      type: agent
+      agent_prompt: |
+        Verify the database backup that just completed:
+
+        1. Check the backup file exists at /backups/db/latest.sql.gz
+        2. Verify file size is reasonable (> 100MB for our database)
+        3. Run `pg_restore --list /backups/db/latest.sql.gz` to verify structure
+        4. Compare table counts with a quick production query
+
+        Report your findings. If anything looks wrong, create a high-priority
+        alert. If everything looks good, log success and update the verification
+        timestamp.
+      timeout_seconds: 300
+
+    risk_level: low  # Read-only verification
+    confidence_threshold: 0.7
+    requires_approval: false
+
+    limits:
+      max_executions_per_hour: 2
+      max_executions_per_day: 5
+
+    tags:
+      - backup
+      - verification
+      - scheduled
+    owner: dba-team
+
+
+# ==============================================================================
+# EXAMPLE 4: Disk Space Monitor
+# ==============================================================================
+# Monitors disk usage and cleans up temporary files when space is low.
+
+  - id: disk-space-monitor
+    name: "Disk Space Monitor"
+    description: |
+      Monitors disk usage on critical partitions.
+      When usage exceeds 85%, cleans up safe temporary directories.
+      When usage exceeds 95%, alerts immediately without cleanup.
+
+    trigger:
+      event_type: custom
+      filter:
+        metric: "disk_usage_percent"
+        value: "regex:8[5-9]|9[0-4]"  # 85-94%
+        partition: "/var"
+      cooldown_seconds: 1800  # 30 minute cooldown
+
+    action:
+      type: shell
+      command: |
+        # Clean up safe directories
+        find /var/tmp -type f -mtime +7 -delete 2>/dev/null
+        find /var/log -name "*.gz" -mtime +30 -delete 2>/dev/null
+        find /var/cache/apt/archives -type f -name "*.deb" -delete 2>/dev/null
+
+        # Report new usage
+        df -h /var
+      timeout_seconds: 120
+
+    risk_level: medium  # Deleting files requires care
+    confidence_threshold: 0.85
+    requires_approval: false
+
+    limits:
+      max_executions_per_hour: 2
+      max_executions_per_day: 6
+
+    tags:
+      - infrastructure
+      - storage
+      - cleanup
+    owner: ops-team
+
+
+# ==============================================================================
+# EXAMPLE 5: API Rate Limit Monitor
+# ==============================================================================
+# Monitors external API rate limit headers and adjusts internal throttling.
+
+  - id: api-rate-limit-monitor
+    name: "API Rate Limit Monitor"
+    description: |
+      Monitors responses from external APIs for rate limit headers.
+      When approaching limits (>80% consumed), automatically adjusts
+      internal request throttling to stay under limits.
+
+    trigger:
+      event_type: http_check
+      filter:
+        source: "api_monitor"
+        rate_limit_remaining: "regex:[0-9]|[1-4][0-9]"  # < 50 remaining
+      cooldown_seconds: 300
+
+    action:
+      type: http
+      url: "http://localhost:18789/api/config/throttle"
+      method: POST
+      body:
+        external_api_throttle_percent: 50
+        duration_minutes: 15
+      timeout_seconds: 10
+
+    risk_level: low  # Internal config change, easily reversible
+    confidence_threshold: 0.7
+    requires_approval: false
+
+    limits:
+      max_executions_per_hour: 4
+      max_executions_per_day: 20
+
+    tags:
+      - api
+      - throttling
+      - external
+    owner: backend-team
+
+
+# ==============================================================================
+# EXAMPLE 6: Security Alert Handler (High Risk - Requires Approval)
+# ==============================================================================
+# Responds to security alerts. Always requires human approval due to risk.
+
+  - id: security-alert-handler
+    name: "Security Alert Handler"
+    description: |
+      Handles security alerts from the intrusion detection system.
+      Proposes blocking suspicious IPs but ALWAYS requires human approval
+      since blocking the wrong IP could cause an outage.
+
+    trigger:
+      event_type: webhook
+      filter:
+        source: "intrusion_detection"
+        severity: "high"
+      cooldown_seconds: 60
+
+    action:
+      type: shell
+      command: "iptables -A INPUT -s {{ event.payload.source_ip }} -j DROP"
+      timeout_seconds: 10
+
+    risk_level: high  # Network changes are high risk
+    confidence_threshold: 1.0  # Never auto-approve
+    requires_approval: true  # ALWAYS require human approval
+
+    limits:
+      max_executions_per_hour: 10
+      max_executions_per_day: 50
+
+    tags:
+      - security
+      - firewall
+      - manual-approval
+    owner: security-team
+
+
+# ==============================================================================
+# EXAMPLE 7: Intelligent Incident Response
+# ==============================================================================
+# Uses the full agent capability for complex incident response.
+
+  - id: intelligent-incident-response
+    name: "Intelligent Incident Response"
+    description: |
+      Triggered when multiple related alerts fire within a short window.
+      Uses the agent to analyze the situation, correlate events, and
+      propose a response plan. Always gets approval before executing.
+
+    trigger:
+      event_type: custom
+      filter:
+        alert_type: "correlated_incident"
+        severity: "regex:high|critical"
+      cooldown_seconds: 600
+
+    action:
+      type: agent
+      agent_prompt: |
+        A correlated incident has been detected. Multiple alerts fired:
+
+        {{ event.payload.alerts | json }}
+
+        Please:
+        1. Analyze the alerts and identify the likely root cause
+        2. Check recent deployments or changes that might be related
+        3. Propose a remediation plan with specific steps
+        4. Estimate the risk and potential impact of each step
+
+        Present your analysis and wait for approval before taking any action.
+      timeout_seconds: 600
+
+    risk_level: critical  # Complex incidents need human oversight
+    confidence_threshold: 1.0
+    requires_approval: true
+
+    limits:
+      max_executions_per_hour: 5
+      max_executions_per_day: 20
+
+    tags:
+      - incident
+      - analysis
+      - manual-approval
+    owner: sre-team
+
+
+# ==============================================================================
+# HTTP MONITORS CONFIGURATION
+# ==============================================================================
+# Define the HTTP endpoints to monitor
+
+http_monitors:
+  - id: main-website
+    url: "https://mysite.com/health"
+    method: GET
+    expected_status: 200
+    timeout_seconds: 10
+    interval_seconds: 60
+    headers:
+      User-Agent: "AG3NT-Monitor/1.0"
+    alert_on_status: [500, 502, 503, 504]
+    alert_on_timeout: true
+    response_time_threshold_ms: 5000
+
+  - id: api-health
+    url: "https://api.mysite.com/v1/health"
+    method: GET
+    expected_status: 200
+    timeout_seconds: 5
+    interval_seconds: 30
+
+  - id: external-dependency
+    url: "https://third-party-api.com/status"
+    method: GET
+    expected_status: 200
+    timeout_seconds: 15
+    interval_seconds: 120
+
+
+# ==============================================================================
+# FILE WATCHERS CONFIGURATION
+# ==============================================================================
+# Define directories to watch for changes
+
+file_watchers:
+  - id: config-changes
+    path: "/etc/myapp"
+    patterns: ["*.conf", "*.yaml", "*.json"]
+    events: [modified, created, deleted]
+    recursive: true
+    debounce_seconds: 5
+    ignore_patterns: ["*.bak", "*.tmp", "*~"]
+
+  - id: deploy-trigger
+    path: "/var/deploy"
+    patterns: ["*.trigger"]
+    events: [created]
+    recursive: false
+    debounce_seconds: 1
+
+
+# ==============================================================================
+# LOG MONITORS CONFIGURATION
+# ==============================================================================
+# Define log patterns to watch
+
+log_monitors:
+  - id: app-errors
+    path: "/var/log/myapp/error.log"
+    patterns:
+      - "regex:CRITICAL|FATAL|EMERGENCY"
+      - "regex:Exception.*stack trace"
+      - "regex:OutOfMemoryError"
+    window_seconds: 60
+    threshold_count: 1  # Alert on first match for critical errors
+
+  - id: auth-failures
+    path: "/var/log/auth.log"
+    patterns:
+      - "regex:Failed password"
+      - "regex:authentication failure"
+    window_seconds: 300
+    threshold_count: 5  # Alert after 5 failures in 5 minutes
+
+
+# ==============================================================================
+# GLOBAL SETTINGS
+# ==============================================================================
+
+settings:
+  # Emergency stop - pause all autonomous actions
+  emergency_stop: false
+
+  # Default confidence threshold for new goals
+  default_confidence_threshold: 0.75
+
+  # Global rate limits
+  global_limits:
+    max_concurrent_actions: 3
+    max_actions_per_minute: 10
+    max_agent_tokens_per_hour: 100000
+
+  # Notification preferences
+  notifications:
+    default_channel: "slack:#ag3nt-autonomous"
+    escalation_channel: "slack:#oncall-alerts"
+    daily_summary_time: "09:00"
+    weekly_report_day: "monday"
+
+  # Learning settings
+  learning:
+    min_samples_for_confidence: 3
+    confidence_decay_days: 30
+    success_weight: 1.0
+    failure_weight: 1.5  # Failures weigh more than successes
