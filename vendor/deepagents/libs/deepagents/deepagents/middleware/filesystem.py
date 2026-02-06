@@ -582,9 +582,43 @@ class FilesystemMiddleware(AgentMiddleware):
             coroutine=async_read_file,
         )
 
+    @staticmethod
+    def _take_pre_edit_snapshot(path: str, tool_call_id: str, tool_name: str) -> None:
+        """Take a snapshot before a file-modifying operation (best-effort).
+
+        Captures the workspace state so the change can be undone later.
+        """
+        try:
+            from ag3nt_agent.snapshot import get_snapshot_manager
+            from ag3nt_agent.revert import SessionRevert
+            mgr = get_snapshot_manager()
+            tree_hash = mgr.take_snapshot(
+                label=f"before {tool_name} on {os.path.basename(path)}",
+                files=[path],
+            )
+            revert = SessionRevert.get_instance()
+            session_id = os.environ.get("AG3NT_SESSION_ID", "default")
+            revert.record_action(
+                session_id=session_id,
+                tool_call_id=tool_call_id,
+                files=[path],
+                snapshot_before=tree_hash,
+                tool_name=tool_name,
+            )
+        except Exception:
+            pass  # Snapshot is best-effort — never block the actual operation
+
     def _create_write_file_tool(self) -> BaseTool:
         """Create the write_file tool."""
         tool_description = self._custom_tool_descriptions.get("write_file") or WRITE_FILE_TOOL_DESCRIPTION
+
+        def _post_write_diagnostics(path: str) -> str:
+            """Get post-write LSP + lint diagnostics (best-effort)."""
+            try:
+                from ag3nt_agent.post_edit_hook import get_post_edit_diagnostics_sync
+                return get_post_edit_diagnostics_sync(path)
+            except Exception:
+                return ""
 
         def sync_write_file(
             file_path: Annotated[str, "Absolute path where the file should be created. Must be absolute, not relative."],
@@ -594,9 +628,14 @@ class FilesystemMiddleware(AgentMiddleware):
             """Synchronous wrapper for write_file tool."""
             resolved_backend = self._get_backend(runtime)
             validated_path = _validate_path(file_path)
+            FilesystemMiddleware._take_pre_edit_snapshot(validated_path, runtime.tool_call_id, "write_file")
             res: WriteResult = resolved_backend.write(validated_path, content)
             if res.error:
                 return res.error
+            msg = f"Updated file {res.path}"
+            diag = _post_write_diagnostics(validated_path)
+            if diag:
+                msg += diag
             # If backend returns state update, wrap into Command with ToolMessage
             if res.files_update is not None:
                 return Command(
@@ -604,13 +643,13 @@ class FilesystemMiddleware(AgentMiddleware):
                         "files": res.files_update,
                         "messages": [
                             ToolMessage(
-                                content=f"Updated file {res.path}",
+                                content=msg,
                                 tool_call_id=runtime.tool_call_id,
                             )
                         ],
                     }
                 )
-            return f"Updated file {res.path}"
+            return msg
 
         async def async_write_file(
             file_path: Annotated[str, "Absolute path where the file should be created. Must be absolute, not relative."],
@@ -620,9 +659,14 @@ class FilesystemMiddleware(AgentMiddleware):
             """Asynchronous wrapper for write_file tool."""
             resolved_backend = self._get_backend(runtime)
             validated_path = _validate_path(file_path)
+            FilesystemMiddleware._take_pre_edit_snapshot(validated_path, runtime.tool_call_id, "write_file")
             res: WriteResult = await resolved_backend.awrite(validated_path, content)
             if res.error:
                 return res.error
+            msg = f"Updated file {res.path}"
+            diag = _post_write_diagnostics(validated_path)
+            if diag:
+                msg += diag
             # If backend returns state update, wrap into Command with ToolMessage
             if res.files_update is not None:
                 return Command(
@@ -630,13 +674,13 @@ class FilesystemMiddleware(AgentMiddleware):
                         "files": res.files_update,
                         "messages": [
                             ToolMessage(
-                                content=f"Updated file {res.path}",
+                                content=msg,
                                 tool_call_id=runtime.tool_call_id,
                             )
                         ],
                     }
                 )
-            return f"Updated file {res.path}"
+            return msg
 
         return StructuredTool.from_function(
             name="write_file",
@@ -649,6 +693,14 @@ class FilesystemMiddleware(AgentMiddleware):
         """Create the edit_file tool."""
         tool_description = self._custom_tool_descriptions.get("edit_file") or EDIT_FILE_TOOL_DESCRIPTION
 
+        def _post_edit_diagnostics(path: str) -> str:
+            """Get post-edit LSP + lint diagnostics (best-effort)."""
+            try:
+                from ag3nt_agent.post_edit_hook import get_post_edit_diagnostics_sync
+                return get_post_edit_diagnostics_sync(path)
+            except Exception:
+                return ""
+
         def sync_edit_file(
             file_path: Annotated[str, "Absolute path to the file to edit. Must be absolute, not relative."],
             old_string: Annotated[str, "The exact text to find and replace. Must be unique in the file unless replace_all is True."],
@@ -660,22 +712,27 @@ class FilesystemMiddleware(AgentMiddleware):
             """Synchronous wrapper for edit_file tool."""
             resolved_backend = self._get_backend(runtime)
             validated_path = _validate_path(file_path)
+            FilesystemMiddleware._take_pre_edit_snapshot(validated_path, runtime.tool_call_id, "edit_file")
             res: EditResult = resolved_backend.edit(validated_path, old_string, new_string, replace_all=replace_all)
             if res.error:
                 return res.error
+            diag = _post_edit_diagnostics(validated_path)
+            msg = f"Successfully replaced {res.occurrences} instance(s) of the string in '{res.path}'"
+            if diag:
+                msg += diag
             if res.files_update is not None:
                 return Command(
                     update={
                         "files": res.files_update,
                         "messages": [
                             ToolMessage(
-                                content=f"Successfully replaced {res.occurrences} instance(s) of the string in '{res.path}'",
+                                content=msg,
                                 tool_call_id=runtime.tool_call_id,
                             )
                         ],
                     }
                 )
-            return f"Successfully replaced {res.occurrences} instance(s) of the string in '{res.path}'"
+            return msg
 
         async def async_edit_file(
             file_path: Annotated[str, "Absolute path to the file to edit. Must be absolute, not relative."],
@@ -688,22 +745,27 @@ class FilesystemMiddleware(AgentMiddleware):
             """Asynchronous wrapper for edit_file tool."""
             resolved_backend = self._get_backend(runtime)
             validated_path = _validate_path(file_path)
+            FilesystemMiddleware._take_pre_edit_snapshot(validated_path, runtime.tool_call_id, "edit_file")
             res: EditResult = await resolved_backend.aedit(validated_path, old_string, new_string, replace_all=replace_all)
             if res.error:
                 return res.error
+            diag = _post_edit_diagnostics(validated_path)
+            msg = f"Successfully replaced {res.occurrences} instance(s) of the string in '{res.path}'"
+            if diag:
+                msg += diag
             if res.files_update is not None:
                 return Command(
                     update={
                         "files": res.files_update,
                         "messages": [
                             ToolMessage(
-                                content=f"Successfully replaced {res.occurrences} instance(s) of the string in '{res.path}'",
+                                content=msg,
                                 tool_call_id=runtime.tool_call_id,
                             )
                         ],
                     }
                 )
-            return f"Successfully replaced {res.occurrences} instance(s) of the string in '{res.path}'"
+            return msg
 
         return StructuredTool.from_function(
             name="edit_file",

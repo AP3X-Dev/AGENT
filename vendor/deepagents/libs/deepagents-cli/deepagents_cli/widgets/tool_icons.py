@@ -76,6 +76,11 @@ TOOL_ICONS: dict[str, ToolIcon] = {
     "git_status": ToolIcon("📊", "orange1", "git"),
     "git_diff": ToolIcon("📊", "orange1", "git"),
     "git_commit": ToolIcon("📊", "green", "git"),
+    # Exec/Process tools
+    "exec_command": ToolIcon("⚡", "yellow", "exec"),
+    "process_tool": ToolIcon("🔄", "cyan", "process"),
+    # Patch tools
+    "apply_patch": ToolIcon("🩹", "green", "patch"),
 }
 
 # Default icon for unknown tools
@@ -131,6 +136,9 @@ TOOL_CATEGORIES: dict[str, str] = {
     "research": "Research",
     "mcp": "MCP Tools",
     "git": "Git Operations",
+    "exec": "Shell Execution",
+    "process": "Process Management",
+    "patch": "Patch Operations",
     "unknown": "Other Tools",
 }
 

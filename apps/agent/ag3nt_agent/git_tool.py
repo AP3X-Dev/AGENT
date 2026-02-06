@@ -15,6 +15,7 @@ Security Note:
 
 from __future__ import annotations
 
+import logging
 import re
 import subprocess
 import time
@@ -22,6 +23,10 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Literal
+
+from langchain_core.tools import tool
+
+logger = logging.getLogger("ag3nt.tools.git")
 
 
 class GitOperation(Enum):
@@ -1091,4 +1096,171 @@ DESCRIPTION:
             "title": title or "Update from AG3NT",
             "body": description,
         }
+
+
+# =============================================================================
+# LangChain @tool wrappers
+# =============================================================================
+
+def _get_workspace_git() -> GitTool:
+    """Get a GitTool instance for the agent workspace."""
+    workspace = Path.home() / ".ag3nt" / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    # Initialize git repo if not present
+    git_dir = workspace / ".git"
+    if not git_dir.exists():
+        subprocess.run(
+            ["git", "init"],
+            cwd=workspace,
+            capture_output=True,
+            timeout=10,
+        )
+        # Configure basic git identity for commits
+        subprocess.run(
+            ["git", "config", "user.email", "agent@ag3nt.dev"],
+            cwd=workspace,
+            capture_output=True,
+            timeout=5,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "AG3NT Agent"],
+            cwd=workspace,
+            capture_output=True,
+            timeout=5,
+        )
+
+    return GitTool(workspace)
+
+
+@tool
+def git_status() -> str:
+    """Show the current git repository status.
+
+    Returns working tree status including staged, unstaged, and untracked files.
+    """
+    try:
+        git = _get_workspace_git()
+        result = git.status()
+        return result.to_content()
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@tool
+def git_diff(
+    staged: bool = False,
+    paths: list[str] | None = None,
+) -> str:
+    """Show file differences in the git repository.
+
+    Args:
+        staged: If True, show staged (cached) changes only.
+        paths: Optional list of file paths to diff.
+    """
+    try:
+        git = _get_workspace_git()
+        result = git.diff(paths=paths, staged=staged)
+        # Truncate long diffs for context window
+        content = result.to_content()
+        if len(content) > 10_000:
+            formatter = DiffFormatter()
+            content = formatter.format_for_llm(content, max_lines=150)
+        return content
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@tool
+def git_log(
+    n: int = 10,
+    oneline: bool = True,
+) -> str:
+    """Show recent git commit history.
+
+    Args:
+        n: Number of commits to show (default: 10).
+        oneline: Use compact one-line format (default: True).
+    """
+    try:
+        git = _get_workspace_git()
+        result = git.log(n=n, oneline=oneline)
+        return result.to_content()
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@tool
+def git_add(paths: list[str] | None = None) -> str:
+    """Stage files for the next commit.
+
+    Args:
+        paths: List of file paths to stage. If None, stages all changes.
+    """
+    try:
+        git = _get_workspace_git()
+        target = paths if paths else "."
+        result = git.add(target)
+        return result.to_content()
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@tool
+def git_commit(message: str) -> str:
+    """Create a git commit with staged changes.
+
+    Args:
+        message: Commit message (conventional commit format recommended).
+    """
+    try:
+        git = _get_workspace_git()
+        result = git.commit(message)
+        return result.to_content()
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@tool
+def git_branch() -> str:
+    """List git branches and show the current branch."""
+    try:
+        git = _get_workspace_git()
+        current = git.current_branch()
+        result = git.branch()
+        return f"Current branch: {current}\n\n{result.to_content()}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@tool
+def git_show(commit: str = "HEAD") -> str:
+    """Show details of a specific commit.
+
+    Args:
+        commit: Commit reference (hash, branch, tag, or HEAD). Default: HEAD.
+    """
+    try:
+        git = _get_workspace_git()
+        result = git.show(commit, stat=True)
+        return result.to_content()
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def get_git_tools() -> list:
+    """Get all git LangChain tools for the agent.
+
+    Returns:
+        List of @tool decorated git functions.
+    """
+    return [
+        git_status,
+        git_diff,
+        git_log,
+        git_add,
+        git_commit,
+        git_branch,
+        git_show,
+    ]
 

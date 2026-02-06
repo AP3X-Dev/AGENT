@@ -20,5 +20,16 @@ langchain-mcp-adapters>=0.1.0
 faiss-cpu>=1.7.4  # Vector similarity search
 langchain-text-splitters>=0.2.0  # Text chunking for memory indexing
 
+# File watching
+watchdog>=4.0  # Cross-platform filesystem events
+pathspec>=0.11.0  # Gitignore pattern matching
+
 # Browser automation
 playwright>=1.40.0  # Web automation and scraping
+
+# Persistent checkpointer
+langgraph-checkpoint-sqlite>=2.0.0  # Persistent checkpointer
+
+# Autonomous System
+httpx>=0.25.0  # Async HTTP client for Context-Engine
+pyyaml>=6.0  # YAML parsing for goal configurations

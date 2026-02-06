@@ -49,6 +49,7 @@ export function createSessionRoutes(
       sessions = sessions.slice(0, maxLimit);
 
       res.json({
+        ok: true,
         sessions: sessions.map((s) => ({
           id: s.id,
           channelType: s.channelType,
@@ -59,12 +60,40 @@ export function createSessionRoutes(
           createdAt: s.createdAt.toISOString(),
           lastActivityAt: s.lastActivityAt.toISOString(),
           paired: s.paired,
+          pairingCode: s.pairingCode,
           messageCount: messageStore.getMessageCount(s.id),
         })),
       });
     } catch (error) {
       console.error('[sessions] Failed to list sessions:', error);
       res.status(500).json({ error: 'Failed to list sessions' });
+    }
+  });
+
+  // GET /api/sessions/pending - Get pending (unpaired) sessions
+  // IMPORTANT: This must be defined BEFORE /:id to avoid "pending" being treated as an ID
+  router.get('/pending', (_req: Request, res: Response) => {
+    try {
+      const pending = sessionManager.getPendingSessions();
+      res.json({
+        ok: true,
+        sessions: pending.map((s) => ({
+          id: s.id,
+          channelType: s.channelType,
+          channelId: s.channelId,
+          chatId: s.chatId,
+          userId: s.userId,
+          userName: s.userName,
+          createdAt: s.createdAt.toISOString(),
+          lastActivityAt: s.lastActivityAt.toISOString(),
+          paired: s.paired,
+          pairingCode: s.pairingCode,
+          pairingCodeExpiresAt: s.pairingCodeExpiresAt?.toISOString(),
+        })),
+      });
+    } catch (error) {
+      console.error('[sessions] Failed to get pending sessions:', error);
+      res.status(500).json({ error: 'Failed to get pending sessions' });
     }
   });
 
@@ -79,6 +108,7 @@ export function createSessionRoutes(
       }
 
       res.json({
+        ok: true,
         id: session.id,
         channelType: session.channelType,
         channelId: session.channelId,
@@ -88,6 +118,7 @@ export function createSessionRoutes(
         createdAt: session.createdAt.toISOString(),
         lastActivityAt: session.lastActivityAt.toISOString(),
         paired: session.paired,
+        pairingCode: session.pairingCode,
         messageCount: messageStore.getMessageCount(session.id),
       });
     } catch (error) {

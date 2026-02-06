@@ -108,11 +108,52 @@ class EditFileRenderer(ToolRenderer):
         return diff_list[2:] if len(diff_list) > 2 else diff_list
 
 
+class ExecCommandRenderer(ToolRenderer):
+    """Renderer for exec_command tool - shows command text."""
+
+    def get_approval_widget(
+        self, tool_args: dict[str, Any]
+    ) -> tuple[type[ToolApprovalWidget], dict[str, Any]]:
+        command = tool_args.get("command", "")
+        bg = tool_args.get("background", False)
+        data = {
+            "command": command,
+            "background": bg,
+            "workdir": tool_args.get("workdir", ""),
+        }
+        return GenericApprovalWidget, data
+
+
+class ApplyPatchRenderer(ToolRenderer):
+    """Renderer for apply_patch tool - shows file list."""
+
+    def get_approval_widget(
+        self, tool_args: dict[str, Any]
+    ) -> tuple[type[ToolApprovalWidget], dict[str, Any]]:
+        import re
+
+        patch_text = tool_args.get("patch", "")
+        files = re.findall(
+            r"\*\*\*\s+(Add|Update|Delete)\s+File:\s*(.+)",
+            patch_text,
+            re.IGNORECASE,
+        )
+        file_list = [{"action": a.lower(), "path": p.strip()} for a, p in files]
+        data = {
+            "files": file_list,
+            "file_count": len(file_list),
+            "dry_run": tool_args.get("dry_run", False),
+        }
+        return GenericApprovalWidget, data
+
+
 # Registry mapping tool names to renderers
 # Note: bash/shell use minimal approval (no renderer needed) - see ApprovalMenu._MINIMAL_TOOLS
 _RENDERER_REGISTRY: dict[str, type[ToolRenderer]] = {
     "write_file": WriteFileRenderer,
     "edit_file": EditFileRenderer,
+    "exec_command": ExecCommandRenderer,
+    "apply_patch": ApplyPatchRenderer,
 }
 
 

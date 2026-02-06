@@ -6,7 +6,6 @@ and wait for responses during execution using the DeepAgents interrupt mechanism
 
 from typing import Any, Literal
 from langchain_core.tools import tool
-from langchain.agents import Command
 
 
 @tool

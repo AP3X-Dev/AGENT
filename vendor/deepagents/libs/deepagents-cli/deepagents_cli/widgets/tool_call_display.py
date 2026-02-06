@@ -50,7 +50,8 @@ class ToolCallDisplayBase(Vertical):
     DEFAULT_CSS = """
     /* Base styles for all tool display widgets - using inheritance-compatible selectors */
     ToolCallDisplayBase, ToolCallDisplay, WebSearchDisplay, ShellCommandDisplay,
-    FileOperationDisplay, TaskAgentDisplay, SandboxToolDisplay {
+    FileOperationDisplay, TaskAgentDisplay, SandboxToolDisplay,
+    ExecCommandDisplay, ProcessToolDisplay, ApplyPatchDisplay {
         height: auto;
         padding: 0 1;
         margin: 1 0;
@@ -60,7 +61,8 @@ class ToolCallDisplayBase(Vertical):
 
     ToolCallDisplayBase:hover, ToolCallDisplay:hover, WebSearchDisplay:hover,
     ShellCommandDisplay:hover, FileOperationDisplay:hover, TaskAgentDisplay:hover,
-    SandboxToolDisplay:hover {
+    SandboxToolDisplay:hover, ExecCommandDisplay:hover, ProcessToolDisplay:hover,
+    ApplyPatchDisplay:hover {
         background: $surface-lighten-1;
     }
 
@@ -596,6 +598,73 @@ class TaskAgentDisplay(ToolCallDisplayBase):
         return "Task Agent"
 
 
+class ExecCommandDisplay(ToolCallDisplayBase):
+    """Display widget for exec_command tool.
+
+    Shows the command being executed with background/PTY badges.
+    """
+
+    def _get_key_args_display(self) -> str:
+        """Get the command and mode badges for inline display."""
+        cmd = self._args.get("command", "")
+        bg = " [bg]" if self._args.get("background") else ""
+        preview = cmd[:50] + "..." if len(cmd) > 50 else cmd
+        return f"{preview}{bg}"
+
+    def _format_tool_name(self) -> str:
+        """Override to show 'Exec Command'."""
+        return "Exec Command"
+
+
+class ProcessToolDisplay(ToolCallDisplayBase):
+    """Display widget for process_tool actions.
+
+    Shows the action and session summary.
+    """
+
+    def _get_key_args_display(self) -> str:
+        """Get action and session ID for inline display."""
+        action = self._args.get("action", "")
+        session_id = self._args.get("session_id", "")
+        if session_id:
+            return f"{action}: {session_id}"
+        return action
+
+    def _format_tool_name(self) -> str:
+        """Override to show 'Process Manager'."""
+        return "Process Manager"
+
+
+class ApplyPatchDisplay(ToolCallDisplayBase):
+    """Display widget for apply_patch tool.
+
+    Shows file count and affected file names.
+    """
+
+    def _get_key_args_display(self) -> str:
+        """Get file count and names for inline display."""
+        import re
+
+        patch_text = self._args.get("patch", "")
+        # Count file operations
+        files = re.findall(
+            r"\*\*\*\s+(?:Add|Update|Delete)\s+File:\s*(.+)",
+            patch_text,
+            re.IGNORECASE,
+        )
+        if files:
+            names = [f.strip().rsplit("/", 1)[-1] for f in files[:3]]
+            preview = ", ".join(names)
+            if len(files) > 3:
+                preview += f" (+{len(files) - 3} more)"
+            return f"{len(files)} file(s): {preview}"
+        return ""
+
+    def _format_tool_name(self) -> str:
+        """Override to show 'Apply Patch'."""
+        return "Apply Patch"
+
+
 class SandboxToolDisplay(ToolCallDisplayBase):
     """Display widget for E2B sandbox tools.
 
@@ -682,6 +751,11 @@ _TOOL_DISPLAY_REGISTRY: dict[str, type[ToolCallDisplayBase]] = {
     "sandbox_list_files": SandboxToolDisplay,
     "sandbox_run_command": SandboxToolDisplay,
     "sandbox_cleanup": SandboxToolDisplay,
+    # Exec/Process tools
+    "exec_command": ExecCommandDisplay,
+    "process_tool": ProcessToolDisplay,
+    # Patch tools
+    "apply_patch": ApplyPatchDisplay,
 }
 
 

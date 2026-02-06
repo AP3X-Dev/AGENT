@@ -21,6 +21,14 @@ from ag3nt_agent.git_tool import (
     GitResult,
     GitSafetyChecker,
     GitTool,
+    get_git_tools,
+    git_status,
+    git_diff,
+    git_log,
+    git_add,
+    git_commit,
+    git_branch,
+    git_show,
 )
 
 
@@ -943,4 +951,162 @@ diff --git a/tests/test_app.py b/tests/test_app.py
         formatted = DiffFormatter.format_for_llm(diff, max_lines=10)
 
         assert "10 more lines" in formatted
+
+
+# ============================================================================
+# @tool Wrapper Tests
+# ============================================================================
+
+
+class TestGetGitTools:
+    """Tests for get_git_tools() factory function."""
+
+    def test_returns_list(self):
+        """Test that get_git_tools returns a list."""
+        tools = get_git_tools()
+        assert isinstance(tools, list)
+
+    def test_returns_seven_tools(self):
+        """Test that get_git_tools returns exactly 7 tools."""
+        tools = get_git_tools()
+        assert len(tools) == 7
+
+    def test_tool_names(self):
+        """Test that all expected tools are present."""
+        tools = get_git_tools()
+        tool_names = {t.name for t in tools}
+        expected = {"git_status", "git_diff", "git_log", "git_add", "git_commit", "git_branch", "git_show"}
+        assert tool_names == expected
+
+    def test_tools_have_descriptions(self):
+        """Test that all tools have descriptions."""
+        tools = get_git_tools()
+        for t in tools:
+            assert t.description, f"Tool {t.name} has no description"
+
+
+class TestGitToolWrappers:
+    """Tests for @tool decorated git wrapper functions."""
+
+    @patch("ag3nt_agent.git_tool._get_workspace_git")
+    def test_git_status_success(self, mock_get_git):
+        """Test git_status tool returns status output."""
+        mock_git = MagicMock()
+        mock_git.status.return_value = GitResult(
+            operation="status",
+            success=True,
+            output="On branch main\nnothing to commit",
+        )
+        mock_get_git.return_value = mock_git
+
+        result = git_status.invoke({})
+        assert "On branch main" in result
+
+    @patch("ag3nt_agent.git_tool._get_workspace_git")
+    def test_git_status_error(self, mock_get_git):
+        """Test git_status handles errors."""
+        mock_get_git.side_effect = Exception("not a git repo")
+        result = git_status.invoke({})
+        assert "Error" in result
+
+    @patch("ag3nt_agent.git_tool._get_workspace_git")
+    def test_git_diff_no_changes(self, mock_get_git):
+        """Test git_diff with no changes."""
+        mock_git = MagicMock()
+        mock_git.diff.return_value = GitResult(
+            operation="diff",
+            success=True,
+            output="(no changes)",
+        )
+        mock_get_git.return_value = mock_git
+
+        result = git_diff.invoke({})
+        assert "(no changes)" in result
+
+    @patch("ag3nt_agent.git_tool._get_workspace_git")
+    def test_git_diff_staged(self, mock_get_git):
+        """Test git_diff with staged=True."""
+        mock_git = MagicMock()
+        mock_git.diff.return_value = GitResult(
+            operation="diff",
+            success=True,
+            output="+new line",
+        )
+        mock_get_git.return_value = mock_git
+
+        result = git_diff.invoke({"staged": True})
+        mock_git.diff.assert_called_once_with(paths=None, staged=True)
+
+    @patch("ag3nt_agent.git_tool._get_workspace_git")
+    def test_git_log_default(self, mock_get_git):
+        """Test git_log with default args."""
+        mock_git = MagicMock()
+        mock_git.log.return_value = GitResult(
+            operation="log",
+            success=True,
+            output="abc1234 Initial commit",
+        )
+        mock_get_git.return_value = mock_git
+
+        result = git_log.invoke({})
+        assert "abc1234" in result
+        mock_git.log.assert_called_once_with(n=10, oneline=True)
+
+    @patch("ag3nt_agent.git_tool._get_workspace_git")
+    def test_git_add_all(self, mock_get_git):
+        """Test git_add with no paths (stage all)."""
+        mock_git = MagicMock()
+        mock_git.add.return_value = GitResult(
+            operation="add",
+            success=True,
+            output="Staged: all files",
+        )
+        mock_get_git.return_value = mock_git
+
+        result = git_add.invoke({})
+        assert "Staged" in result
+
+    @patch("ag3nt_agent.git_tool._get_workspace_git")
+    def test_git_commit_success(self, mock_get_git):
+        """Test git_commit with valid message."""
+        mock_git = MagicMock()
+        mock_git.commit.return_value = GitResult(
+            operation="commit",
+            success=True,
+            output="[main abc1234] feat: add feature",
+        )
+        mock_get_git.return_value = mock_git
+
+        result = git_commit.invoke({"message": "feat: add feature"})
+        assert "abc1234" in result
+
+    @patch("ag3nt_agent.git_tool._get_workspace_git")
+    def test_git_branch_shows_current(self, mock_get_git):
+        """Test git_branch shows current branch."""
+        mock_git = MagicMock()
+        mock_git.current_branch.return_value = "main"
+        mock_git.branch.return_value = GitResult(
+            operation="branch",
+            success=True,
+            output="* main\n  feature",
+        )
+        mock_get_git.return_value = mock_git
+
+        result = git_branch.invoke({})
+        assert "Current branch: main" in result
+
+    @patch("ag3nt_agent.git_tool._get_workspace_git")
+    def test_git_show_default(self, mock_get_git):
+        """Test git_show with default (HEAD)."""
+        mock_git = MagicMock()
+        mock_git.show.return_value = GitResult(
+            operation="show",
+            success=True,
+            output="commit abc1234\nAuthor: Test",
+        )
+        mock_get_git.return_value = mock_git
+
+        result = git_show.invoke({})
+        assert "abc1234" in result
+        mock_git.show.assert_called_once_with("HEAD", stat=True)
 

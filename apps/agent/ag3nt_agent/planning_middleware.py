@@ -11,8 +11,12 @@ prompt to guide the agent through planning and execution phases.
 """
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Awaitable, Callable
 import logging
+import threading
+
+from langchain.agents.middleware.types import AgentMiddleware, AgentState, ModelRequest, ModelResponse
+from deepagents.middleware._utils import append_to_system_message
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +31,14 @@ class PlanningState:
     plan_tasks: list[str] = field(default_factory=list)  # List of task descriptions
     current_task_index: int = 0  # Current task being executed
 
+    # Context engineering extensions (all backward-compatible defaults)
+    context_engineering: bool = False  # Whether PRP-style planning is active
+    context_package: str = ""  # Serialized context for prompt injection
+    active_blueprint_id: str | None = None  # Active blueprint ID
+    validation_gates_enabled: bool = False  # Run validation between tasks
 
-class PlanningMiddleware:
+
+class PlanningMiddleware(AgentMiddleware[AgentState, Any]):
     """Middleware that enforces planning before execution.
 
     When enabled, this middleware:
@@ -38,47 +48,68 @@ class PlanningMiddleware:
     - Provides progress updates as tasks complete
     """
 
-    def __init__(self):
+    # Tools blocked during planning phase
+    BLOCKED_TOOLS = frozenset({
+        "shell", "exec_command", "write_file", "edit_file",
+        "delete_file", "apply_patch", "multi_edit", "git_commit",
+    })
+
+    def __init__(self, yolo_mode: bool = False):
         self.sessions: dict[str, PlanningState] = {}
-        logger.info("PlanningMiddleware initialized")
+        self.tools = []  # Required by AgentMiddleware
+        self._lock = threading.Lock()
+        self.yolo_mode = yolo_mode
+        logger.info(f"PlanningMiddleware initialized (yolo_mode={yolo_mode})")
 
-    async def __call__(self, state: dict, config: dict) -> dict:
-        """Intercept agent execution to enforce planning.
+    def before_model(self, state: AgentState, runtime: Any) -> dict[str, Any] | None:
+        """Intercept before model call to enforce planning."""
+        # Get thread_id from runtime config
+        config = getattr(runtime, 'config', {}) or {}
+        configurable = config.get("configurable", {})
+        thread_id = configurable.get("thread_id", "default")
 
-        Args:
-            state: Current agent state
-            config: Configuration dict with metadata
+        with self._lock:
+            # Get or create planning state for this session
+            if thread_id not in self.sessions:
+                # Check if plan_mode enabled in metadata
+                metadata = config.get("metadata", {})
+                plan_mode = metadata.get("plan_mode", False)
+                context_engineering = metadata.get("context_engineering", False)
+                self.sessions[thread_id] = PlanningState(
+                    enabled=plan_mode,
+                    context_engineering=context_engineering,
+                    validation_gates_enabled=context_engineering,
+                )
+                if plan_mode:
+                    logger.info(f"Planning mode activated for session {thread_id}")
+                if context_engineering:
+                    logger.info(f"Context engineering activated for session {thread_id}")
 
-        Returns:
-            Modified state with planning instructions injected
-        """
-        thread_id = config["configurable"]["thread_id"]
-
-        # Get or create planning state for this session
-        if thread_id not in self.sessions:
-            # Check if plan_mode enabled in metadata
-            plan_mode = config.get("metadata", {}).get("plan_mode", False)
-            self.sessions[thread_id] = PlanningState(enabled=plan_mode)
-            if plan_mode:
-                logger.info(f"Planning mode activated for session {thread_id}")
-
-        plan_state = self.sessions[thread_id]
+            plan_state = self.sessions[thread_id]
 
         # If planning mode not enabled, pass through
         if not plan_state.enabled:
-            return state
+            return None
 
-        # Inject appropriate prompt based on phase
-        if plan_state.planning_phase and not plan_state.plan_confirmed:
-            state = self._inject_planning_prompt(state)
-        elif plan_state.plan_confirmed:
-            state = self._inject_execution_prompt(state, plan_state)
+        # Trigger context gathering on first call when context_engineering is on.
+        # This populates plan_state.context_package so it's ready by the time
+        # wrap_model_call injects it into the system prompt.
+        if (
+            plan_state.context_engineering
+            and plan_state.planning_phase
+            and not plan_state.context_package
+        ):
+            plan_state.context_package = self._gather_context_sync(
+                state, config, thread_id,
+            )
 
-        return state
+        # System message injection is done in wrap_model_call / awrap_model_call
+        # using request.override(system_message=...) — NOT via state updates.
+        return None
 
-    def _inject_planning_prompt(self, state: dict) -> dict:
-        """Add planning instructions to system prompt."""
-        planning_instruction = """
+    def _get_planning_prompt(self) -> str:
+        """Get planning instructions to add to system prompt."""
+        return """
 
 🎯 **PLANNING MODE ACTIVE**
 
@@ -146,19 +177,13 @@ Structure your response like this:
 
 **Remember:** Do NOT execute any changes yet. Only create the plan.
 """
-        # Append to system message (ensure it exists)
-        if "system_message" not in state or state["system_message"] is None:
-            state["system_message"] = ""
 
-        state["system_message"] = state["system_message"] + planning_instruction
-        return state
-
-    def _inject_execution_prompt(self, state: dict, plan_state: PlanningState) -> dict:
-        """Add execution guidance with progress tracking."""
+    def _get_execution_prompt(self, plan_state: PlanningState) -> str:
+        """Get execution guidance with progress tracking."""
         total_tasks = len(plan_state.plan_tasks)
         current = plan_state.current_task_index + 1
 
-        execution_instruction = f"""
+        return f"""
 
 ✅ **PLAN APPROVED - EXECUTION MODE**
 
@@ -182,56 +207,360 @@ Tasks remaining: {total_tasks - plan_state.current_task_index}
 
 After completing each task, provide a brief progress update.
 """
-        # Append to system message
-        if "system_message" not in state or state["system_message"] is None:
-            state["system_message"] = ""
 
-        state["system_message"] = state["system_message"] + execution_instruction
-        return state
+    def _get_context_planning_prompt(self, context_text: str) -> str:
+        """Get enhanced planning prompt with gathered context."""
+        return f"""
+
+🎯 **CONTEXT-ENGINEERED PLANNING MODE**
+
+You are in planning mode with context engineering enabled.
+Rich context has been gathered from the codebase, past learnings,
+and semantic memory to help you create a better plan.
+
+## Gathered Context
+
+{context_text}
+
+## Planning Process
+
+1. **Review the Context Above**
+   - Examine the relevant code references
+   - Note any anti-patterns to avoid
+   - Consider past learnings and gotchas
+
+2. **Create a Structured Blueprint**
+   Use `write_blueprint` to create a PRP-style plan with:
+   - **goal**: What needs to be achieved
+   - **why**: Business/technical reason
+   - **what**: Detailed description of changes
+   - **tasks**: Ordered list with pseudocode, files, dependencies, and complexity
+   - **success_criteria**: How to verify the work is correct
+   - **anti_patterns**: Things to avoid (from context above)
+   - **gotchas**: Potential issues to watch for
+
+3. **Present for Approval**
+   - Summarize the blueprint
+   - Highlight any risks or assumptions
+   - Ask user to confirm before proceeding
+
+## During Planning Phase
+
+✅ **You CAN:**
+- Read files to understand context
+- Search for information
+- Use memory_search, codebase_search
+- Create a blueprint with `write_blueprint`
+
+❌ **You CANNOT:**
+- Write, edit, or delete files
+- Execute shell commands
+- Make any changes to code
+
+---
+
+**Remember:** Use `write_blueprint` (not `write_todos`) for structured planning.
+"""
+
+    def _get_execution_with_validation_prompt(self, plan_state: PlanningState) -> str:
+        """Get execution prompt with validation gate instructions."""
+        total_tasks = len(plan_state.plan_tasks)
+        current = plan_state.current_task_index + 1
+
+        return f"""
+
+✅ **BLUEPRINT APPROVED - EXECUTION WITH VALIDATION**
+
+Execute the approved blueprint step-by-step with validation gates.
+
+**Progress:** Task {current}/{total_tasks}
+
+## Execution Guidelines
+
+For each task:
+1. **Announce:** State which task you're starting
+2. **Execute:** Perform the task carefully
+3. **Validate:** After completing a task, run the appropriate validation:
+   - Level 1 (Syntax): Lint/format check on modified files
+   - Level 2 (Unit Test): Run relevant unit tests
+   - Level 3 (Integration): Run integration tests if applicable
+4. **Update:** Mark task complete with `update_blueprint_task`
+5. **Report:** Summarize what was done and validation results
+
+## Current Status
+
+Tasks completed: {plan_state.current_task_index}
+Tasks remaining: {total_tasks - plan_state.current_task_index}
+
+If a validation gate fails, fix the issues before moving to the next task.
+"""
+
+    def _gather_context_sync(
+        self, state: Any, config: dict, thread_id: str,
+    ) -> str:
+        """Synchronously gather context for planning.
+
+        Runs the async ``ContextGatherer`` in a thread pool to avoid
+        blocking the middleware's synchronous ``before_model`` path.
+        """
+        try:
+            import asyncio
+            from ag3nt_agent.context_gatherer import ContextGatherer
+
+            # Extract user message from state for the query
+            user_request = ""
+            messages = getattr(state, "messages", None)
+            if messages:
+                for msg in reversed(messages):
+                    content = getattr(msg, "content", "")
+                    role = getattr(msg, "type", "") or getattr(msg, "role", "")
+                    if role in ("human", "user") and content:
+                        user_request = content if isinstance(content, str) else str(content)
+                        break
+
+            if not user_request:
+                return ""
+
+            gatherer = ContextGatherer()
+
+            async def _do_gather() -> str:
+                package = await gatherer.gather_context(user_request, session_id=thread_id)
+                return package.to_prompt_text()
+
+            # Try to run in existing loop, fall back to new loop in thread
+            try:
+                loop = asyncio.get_running_loop()
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    future = pool.submit(asyncio.run, _do_gather())
+                    return future.result(timeout=15)
+            except RuntimeError:
+                return asyncio.run(_do_gather())
+
+        except Exception as exc:
+            logger.warning("Context gathering failed: %s", exc)
+            return ""
 
     def confirm_plan(self, thread_id: str, tasks: list[str]):
-        """User confirmed the plan - switch to execution mode.
-
-        Args:
-            thread_id: Session ID
-            tasks: List of task descriptions from the plan
-        """
-        if thread_id in self.sessions:
-            plan_state = self.sessions[thread_id]
-            plan_state.plan_confirmed = True
-            plan_state.planning_phase = False
-            plan_state.plan_tasks = tasks
-            logger.info(f"Plan confirmed for session {thread_id}: {len(tasks)} tasks")
+        """User confirmed the plan - switch to execution mode."""
+        with self._lock:
+            if thread_id in self.sessions:
+                plan_state = self.sessions[thread_id]
+                plan_state.plan_confirmed = True
+                plan_state.planning_phase = False
+                plan_state.plan_tasks = tasks
+                logger.info(f"Plan confirmed for session {thread_id}: {len(tasks)} tasks")
 
     def advance_task(self, thread_id: str):
-        """Move to next task in plan.
-
-        Args:
-            thread_id: Session ID
-        """
-        if thread_id in self.sessions:
-            self.sessions[thread_id].current_task_index += 1
-            logger.info(
-                f"Advanced to task {self.sessions[thread_id].current_task_index + 1}"
-            )
+        """Move to next task in plan."""
+        with self._lock:
+            if thread_id in self.sessions:
+                self.sessions[thread_id].current_task_index += 1
+                logger.info(
+                    f"Advanced to task {self.sessions[thread_id].current_task_index + 1}"
+                )
 
     def disable_plan_mode(self, thread_id: str):
-        """Disable planning mode for a session.
-
-        Args:
-            thread_id: Session ID
-        """
-        if thread_id in self.sessions:
-            self.sessions[thread_id].enabled = False
-            logger.info(f"Planning mode disabled for session {thread_id}")
+        """Disable planning mode for a session."""
+        with self._lock:
+            if thread_id in self.sessions:
+                self.sessions[thread_id].enabled = False
+                logger.info(f"Planning mode disabled for session {thread_id}")
 
     def get_state(self, thread_id: str) -> PlanningState | None:
-        """Get planning state for a session.
+        """Get planning state for a session."""
+        with self._lock:
+            return self.sessions.get(thread_id)
+
+    def handle_plan_decision(self, thread_id: str, decision: str) -> bool:
+        """Handle a plan confirmation decision.
 
         Args:
             thread_id: Session ID
+            decision: "approve" or "reject"
 
         Returns:
-            PlanningState if exists, None otherwise
+            True if decision was handled, False if no plan pending
         """
-        return self.sessions.get(thread_id)
+        with self._lock:
+            plan_state = self.sessions.get(thread_id)
+            if not plan_state or not plan_state.enabled:
+                return False
+            if plan_state.plan_confirmed:
+                return False
+
+            if decision == "approve":
+                plan_state.plan_confirmed = True
+                plan_state.planning_phase = False
+                logger.info(f"Plan approved for session {thread_id}")
+                return True
+            elif decision == "reject":
+                # Reset planning phase to let agent create a new plan
+                plan_state.plan_tasks = []
+                logger.info(f"Plan rejected for session {thread_id}, resetting")
+                return True
+
+        return False
+
+    def _get_thread_id_from_request(self, request: ModelRequest) -> str:
+        """Extract thread_id from a model request's config."""
+        config = getattr(request, 'config', {}) or {}
+        configurable = config.get("configurable", {})
+        return configurable.get("thread_id", "default")
+
+    def _compute_planning_prompt(self, thread_id: str) -> str | None:
+        """Return the planning/execution prompt text for this session, or None."""
+        with self._lock:
+            plan_state = self.sessions.get(thread_id)
+
+        if not plan_state or not plan_state.enabled:
+            return None
+
+        if plan_state.planning_phase and not plan_state.plan_confirmed:
+            if plan_state.context_engineering and plan_state.context_package:
+                return self._get_context_planning_prompt(plan_state.context_package)
+            return self._get_planning_prompt()
+        elif plan_state.plan_confirmed:
+            if plan_state.validation_gates_enabled:
+                return self._get_execution_with_validation_prompt(plan_state)
+            return self._get_execution_prompt(plan_state)
+
+        return None
+
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelResponse:
+        """Intercept model calls to inject planning prompt and block write tools."""
+        thread_id = self._get_thread_id_from_request(request)
+        prompt_text = self._compute_planning_prompt(thread_id)
+        if prompt_text:
+            new_sys = append_to_system_message(request.system_message, prompt_text)
+            request = request.override(system_message=new_sys)
+        response = handler(request)
+        return self._filter_blocked_tools(request, response)
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelResponse:
+        """Async version of wrap_model_call."""
+        thread_id = self._get_thread_id_from_request(request)
+        prompt_text = self._compute_planning_prompt(thread_id)
+        if prompt_text:
+            new_sys = append_to_system_message(request.system_message, prompt_text)
+            request = request.override(system_message=new_sys)
+        response = await handler(request)
+        return self._filter_blocked_tools(request, response)
+
+    def _filter_blocked_tools(
+        self, request: ModelRequest, response: ModelResponse
+    ) -> ModelResponse:
+        """Check response tool calls and block write tools during planning.
+
+        Also detects write_todos calls to trigger plan confirmation interrupt.
+        """
+        thread_id = self._get_thread_id_from_request(request)
+
+        with self._lock:
+            plan_state = self.sessions.get(thread_id)
+
+        # If not in planning mode or plan is confirmed, allow everything
+        if not plan_state or not plan_state.enabled:
+            return response
+        if plan_state.plan_confirmed:
+            return response
+        if not plan_state.planning_phase:
+            return response
+
+        # YOLO mode: auto-confirm plans without interrupt
+        if self.yolo_mode:
+            # Check for write_todos or write_blueprint call and auto-confirm
+            for tc in response.tool_calls if hasattr(response, 'tool_calls') and response.tool_calls else []:
+                tool_name = tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")
+                if tool_name == "write_todos":
+                    args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
+                    tasks = args.get("todos", args.get("tasks", []))
+                    task_descs = []
+                    if isinstance(tasks, list):
+                        for t in tasks:
+                            if isinstance(t, str):
+                                task_descs.append(t)
+                            elif isinstance(t, dict):
+                                task_descs.append(t.get("description", t.get("title", str(t))))
+                    self.confirm_plan(thread_id, task_descs)
+                    logger.info(f"YOLO mode: auto-confirmed plan for {thread_id}")
+                elif tool_name == "write_blueprint":
+                    args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
+                    bp_tasks = args.get("tasks", [])
+                    task_descs = [
+                        t.get("title", str(t)) if isinstance(t, dict) else str(t)
+                        for t in bp_tasks
+                    ]
+                    self.confirm_plan(thread_id, task_descs)
+                    logger.info(f"YOLO mode: auto-confirmed blueprint for {thread_id}")
+            return response
+
+        # Check if response has tool calls
+        if not hasattr(response, 'tool_calls') or not response.tool_calls:
+            return response
+
+        # Check for write_todos or write_blueprint call — signals a plan was created
+        for tc in response.tool_calls:
+            tool_name = tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")
+            if tool_name == "write_todos":
+                # Extract plan tasks from the tool call args
+                args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
+                tasks = args.get("todos", args.get("tasks", []))
+                if isinstance(tasks, list):
+                    task_descriptions = []
+                    for t in tasks:
+                        if isinstance(t, str):
+                            task_descriptions.append(t)
+                        elif isinstance(t, dict):
+                            task_descriptions.append(t.get("description", t.get("title", str(t))))
+                    with self._lock:
+                        if thread_id in self.sessions:
+                            self.sessions[thread_id].plan_tasks = task_descriptions
+                    logger.info(
+                        f"Plan created for session {thread_id}: {len(task_descriptions)} tasks, awaiting confirmation"
+                    )
+            elif tool_name == "write_blueprint":
+                args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
+                bp_tasks = args.get("tasks", [])
+                task_descriptions = [
+                    t.get("title", str(t)) if isinstance(t, dict) else str(t)
+                    for t in bp_tasks
+                ]
+                with self._lock:
+                    if thread_id in self.sessions:
+                        self.sessions[thread_id].plan_tasks = task_descriptions
+                        # Store blueprint ID if available from tool result later
+                logger.info(
+                    f"Blueprint created for session {thread_id}: {len(task_descriptions)} tasks, awaiting confirmation"
+                )
+
+        # Block write tools
+        blocked = []
+        allowed = []
+        for tc in response.tool_calls:
+            tool_name = tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")
+            if tool_name in self.BLOCKED_TOOLS:
+                blocked.append(tool_name)
+            else:
+                allowed.append(tc)
+
+        if not blocked:
+            return response
+
+        logger.warning(
+            f"Planning phase blocked tools for session {thread_id}: {blocked}"
+        )
+
+        # Remove blocked tool calls from response
+        if hasattr(response, 'override'):
+            return response.override(tool_calls=allowed)
+
+        return response

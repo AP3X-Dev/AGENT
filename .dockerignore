@@ -1,0 +1,14 @@
+node_modules
+dist
+*.log
+.env
+.git
+.claude
+*.pyc
+__pycache__
+.pytest_cache
+.mypy_cache
+coverage
+*.egg-info
+.venv
+venv

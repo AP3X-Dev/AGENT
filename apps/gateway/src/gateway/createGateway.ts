@@ -15,6 +15,7 @@ import express from "express";
 import http from "node:http";
 import path from "node:path";
 import fs from "node:fs";
+import fsp from "node:fs/promises";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer, WebSocket } from "ws";
@@ -38,7 +39,26 @@ import { gatewayLogs } from "../logs/index.js";
 import { getUsageTracker, getErrorRegistry } from "../monitoring/index.js";
 import { MessageStore } from "../storage/MessageStore.js";
 import { createSessionRoutes } from "../routes/sessions.js";
-import { createSubagentRoutes } from "../routes/subagents.js";
+import { createSubagentRoutes, createSessionDirectiveRoutes } from "../routes/subagents.js";
+import { loadPlugins, type PluginRegistry } from "../plugins/index.js";
+import { executeHooks, startServices, stopServices, getHttpRoutes } from "../plugins/registry.js";
+import { SessionStore } from "../session/SessionStore.js";
+import { AgentRouter, SubagentRegistryClient } from "../routing/AgentRouter.js";
+import { QueueManager } from "../routing/MessageQueue.js";
+import { DirectiveManager } from "../directives/DirectiveManager.js";
+import { ActivationChecker } from "../channels/ActivationChecker.js";
+import {
+  createHelmetMiddleware,
+  createCorsMiddleware,
+  createApiKeyAuth,
+  createInputSanitizer,
+  createRequestIdMiddleware,
+} from "../middleware/security.js";
+import { createRateLimitMiddleware, createChatRateLimitMiddleware } from "../middleware/rateLimiter.js";
+import { createRequestLogger } from "../middleware/requestLogger.js";
+import { createHealthRoutes } from "../routes/health.js";
+import { validateWorkspacePath } from "../utils/pathSecurity.js";
+import { sendSuccess, sendError } from "../utils/apiResponse.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -56,7 +76,16 @@ export interface Gateway {
 
 export async function createGateway(config: Config): Promise<Gateway> {
   const app = express();
+
+  // ─── Security & observability middleware (applied in order) ───
+  app.use(createRequestIdMiddleware());
+  app.use(createHelmetMiddleware());
+  app.use(createCorsMiddleware(config));
   app.use(express.json({ limit: "2mb" }));
+  app.use(createInputSanitizer());
+  app.use(createApiKeyAuth());
+  app.use(createRateLimitMiddleware());
+  app.use(createRequestLogger({ skipPaths: ["/api/health/live"] }));
 
   const server = http.createServer(app);
 
@@ -100,6 +129,23 @@ export async function createGateway(config: Config): Promise<Gateway> {
     ...persistedAllowlist,
   ];
 
+  // Enable structured file logging
+  const logDir = path.join(os.homedir(), '.ag3nt', 'logs');
+  gatewayLogs.enableFileLogging({ dir: logDir, minLevel: 'info' });
+  gatewayLogs.info("Logging", `Structured file logging enabled at ${logDir}`);
+
+  // Initialize persistent session store (SQLite)
+  const sessionStorePath = path.join(os.homedir(), '.ag3nt', 'sessions.db');
+  const sessionStore = new SessionStore(sessionStorePath);
+  gatewayLogs.info("SessionStore", `Session store path: ${sessionStorePath}`);
+
+  // Extract default quotas from config
+  const defaultQuotas = config.quotas ? {
+    maxTurnsPerHour: config.quotas.defaultMaxTurnsPerHour,
+    maxTokensPerTurn: config.quotas.defaultMaxTokensPerTurn,
+    maxConcurrent: config.quotas.defaultMaxConcurrent,
+  } : undefined;
+
   // Initialize session manager with DM policy from config
   const sessionManager = new SessionManager({
     dmPolicy: config.security.defaultDMPolicy as DMPolicy,
@@ -107,6 +153,8 @@ export async function createGateway(config: Config): Promise<Gateway> {
     onAllowlistChange: async (allowlist) => {
       await saveAllowlist(allowlistPath, allowlist);
     },
+    sessionStore,
+    defaultQuotas,
   });
 
   // Initialize message store for session history persistence
@@ -150,6 +198,20 @@ export async function createGateway(config: Config): Promise<Gateway> {
   const skillsManager = new SkillsManager(skillsPath);
   gatewayLogs.info("Skills", `Skills path: ${skillsPath}`);
 
+  // Initialize plugin system
+  let pluginRegistry: PluginRegistry | null = null;
+  try {
+    pluginRegistry = await loadPlugins({
+      config,
+      workspaceDir: projectRoot,
+      logger: console,
+    });
+    const loadedCount = pluginRegistry.plugins.filter(p => p.status === 'loaded').length;
+    gatewayLogs.info("Plugins", `Loaded ${loadedCount} plugin(s)`);
+  } catch (err) {
+    gatewayLogs.error("Plugins", `Failed to load plugins: ${err}`);
+  }
+
   // Track connected debug WebSocket clients
   const debugClients: Set<WebSocket> = new Set();
 
@@ -176,13 +238,45 @@ export async function createGateway(config: Config): Promise<Gateway> {
           client.send(message);
         } catch (err) {
           console.error("[Gateway] Error sending log to debug client:", err);
+          debugClients.delete(client);
         }
+      } else {
+        // Remove clients that are no longer open
+        debugClients.delete(client);
       }
     }
   });
 
+  // Initialize activation checker
+  const activationChecker = new ActivationChecker();
+
+  // Initialize directive manager
+  const directiveManager = new DirectiveManager(sessionStore);
+
+  // Initialize agent router
+  const routingConfig = {
+    strategy: (config.routing?.strategy || 'auto') as 'auto' | 'explicit' | 'round-robin',
+    defaultAgent: config.routing?.defaultAgent || '',
+    contentPatterns: [],
+  };
+  const registryClient = new SubagentRegistryClient();
+  const agentRouterInstance = new AgentRouter(routingConfig, registryClient);
+
+  // Initialize queue manager
+  const queueManagerInstance = new QueueManager({
+    queueEnabled: config.routing?.queueEnabled ?? true,
+    queueIntervalMs: config.routing?.queueIntervalMs ?? 100,
+    maxQueueSize: config.routing?.maxQueueSize ?? 1000,
+  });
+
   // Create router with dependencies
-  const router = createRouter(config, { sessionManager });
+  const router = createRouter(config, {
+    sessionManager,
+    agentRouter: agentRouterInstance,
+    queueManager: queueManagerInstance,
+    activationChecker,
+    directiveManager,
+  });
 
   // Wire channel registry message handler to router
   channelRegistry.setMessageHandler(async (message) => {
@@ -293,13 +387,13 @@ export async function createGateway(config: Config): Promise<Gateway> {
     try {
       const { schedule, message, sessionMode, channelTarget, oneShot, name } = req.body;
       if (!schedule || !message) {
-        res.status(400).json({ ok: false, error: "Missing schedule or message" });
+        sendError(res, "Missing schedule or message", 400);
         return;
       }
       const jobId = scheduler.addJob({ schedule, message, sessionMode, channelTarget, oneShot, name });
       res.json({ ok: true, jobId });
     } catch (err) {
-      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      sendError(res, err instanceof Error ? err.message : String(err));
     }
   });
 
@@ -332,7 +426,7 @@ export async function createGateway(config: Config): Promise<Gateway> {
     try {
       const { when, message, channelTarget } = req.body;
       if (!when || !message) {
-        res.status(400).json({ ok: false, error: "Missing when or message" });
+        sendError(res, "Missing when or message", 400);
         return;
       }
       // Parse 'when' - either a date string or milliseconds
@@ -340,11 +434,12 @@ export async function createGateway(config: Config): Promise<Gateway> {
       const jobId = scheduler.scheduleReminder(targetDate, message, channelTarget);
       res.json({ ok: true, jobId });
     } catch (err) {
-      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      sendError(res, err instanceof Error ? err.message : String(err));
     }
   });
 
   // Node registry API endpoints
+  // IMPORTANT: Specific routes must be defined BEFORE /:nodeId to avoid being caught by the catch-all
   app.get(`${config.gateway.httpPath}/nodes`, (_req, res) => {
     res.json({ ok: true, nodes: nodeRegistry.getAllNodes() });
   });
@@ -353,28 +448,19 @@ export async function createGateway(config: Config): Promise<Gateway> {
     res.json({ ok: true, ...nodeRegistry.getStatus() });
   });
 
-  app.get(`${config.gateway.httpPath}/nodes/:nodeId`, (req, res) => {
-    const node = nodeRegistry.getNode(req.params.nodeId);
-    if (node) {
-      res.json({ ok: true, node });
-    } else {
-      res.status(404).json({ ok: false, error: "Node not found" });
-    }
-  });
-
   app.get(`${config.gateway.httpPath}/nodes/capability/:capability`, (req, res) => {
     const capability = req.params.capability as import("../nodes/types.js").NodeCapability;
     const nodes = nodeRegistry.findNodesByCapability(capability);
     res.json({ ok: true, nodes, hasCapability: nodes.length > 0 });
   });
 
-  // Node pairing API endpoints
+  // Node pairing API endpoints (must be before /:nodeId)
   app.post(`${config.gateway.httpPath}/nodes/pairing/generate`, (_req, res) => {
     try {
       const code = nodeConnectionManager.getPairingManager().generatePairingCode();
       res.json({ ok: true, code });
     } catch (err) {
-      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      sendError(res, err instanceof Error ? err.message : String(err));
     }
   });
 
@@ -383,7 +469,7 @@ export async function createGateway(config: Config): Promise<Gateway> {
       const code = nodeConnectionManager.getPairingManager().getActivePairingCode();
       res.json({ ok: true, code });
     } catch (err) {
-      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      sendError(res, err instanceof Error ? err.message : String(err));
     }
   });
 
@@ -392,7 +478,17 @@ export async function createGateway(config: Config): Promise<Gateway> {
       const nodes = nodeConnectionManager.getPairingManager().getApprovedNodes();
       res.json({ ok: true, nodes });
     } catch (err) {
-      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      sendError(res, err instanceof Error ? err.message : String(err));
+    }
+  });
+
+  // Dynamic node routes (must be AFTER specific routes like /status, /approved, /pairing/*)
+  app.get(`${config.gateway.httpPath}/nodes/:nodeId`, (req, res) => {
+    const node = nodeRegistry.getNode(req.params.nodeId);
+    if (node) {
+      res.json({ ok: true, node });
+    } else {
+      sendError(res, "Node not found", 404);
     }
   });
 
@@ -402,7 +498,7 @@ export async function createGateway(config: Config): Promise<Gateway> {
       nodeRegistry.unregisterNode(req.params.nodeId);
       res.json({ ok: true, message: "Node approval removed" });
     } catch (err) {
-      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      sendError(res, err instanceof Error ? err.message : String(err));
     }
   });
 
@@ -413,19 +509,19 @@ export async function createGateway(config: Config): Promise<Gateway> {
       const { action, params, timeout } = req.body;
 
       if (!action) {
-        res.status(400).json({ ok: false, error: "Missing action parameter" });
+        sendError(res, "Missing action parameter", 400);
         return;
       }
 
       // Check if node exists and is online
       const node = nodeRegistry.getNode(nodeId);
       if (!node) {
-        res.status(404).json({ ok: false, error: "Node not found" });
+        sendError(res, "Node not found", 404);
         return;
       }
 
       if (node.status !== "online") {
-        res.status(503).json({ ok: false, error: "Node is offline" });
+        sendError(res, "Node is offline", 503);
         return;
       }
 
@@ -443,12 +539,16 @@ export async function createGateway(config: Config): Promise<Gateway> {
 
       // Check for timeout errors
       if (errorMessage.includes("timeout") || errorMessage.includes("Timeout")) {
-        res.status(504).json({ ok: false, error: "Action timed out" });
+        sendError(res, "Action timed out", 504);
       } else {
-        res.status(500).json({ ok: false, error: errorMessage });
+        sendError(res, errorMessage);
       }
     }
   });
+
+  // Mount enhanced health routes (liveness, readiness, metrics)
+  const healthRoutes = createHealthRoutes({ sessionManager, channelRegistry });
+  app.use("/api/health", healthRoutes);
 
   // Mount session API routes (with message history support)
   const sessionRoutes = createSessionRoutes(sessionManager, messageStore);
@@ -457,6 +557,56 @@ export async function createGateway(config: Config): Promise<Gateway> {
   // Mount subagent API routes (proxied to Agent Worker)
   const subagentRoutes = createSubagentRoutes(config);
   app.use("/api/subagents", subagentRoutes);
+
+  // Mount enhanced session and directive routes
+  // These use PATCH for updates and subroutes for directives, so they don't conflict
+  // with the existing session routes (which use GET for listing and details)
+  const sessionDirectiveRoutes = createSessionDirectiveRoutes(sessionManager, directiveManager);
+  app.use("/api/enhanced-sessions", sessionDirectiveRoutes);
+
+  // Mount SSE stream routes for real-time tool updates
+  const streamModule = await import("../routes/stream.js");
+  const streamRouter = streamModule.createStreamRouter();
+  const toolEventBus = streamModule.toolEventBus;
+  type ToolEvent = import("../routes/stream.js").ToolEvent;
+  app.use("/api/stream", streamRouter);
+
+  // Mount state synchronization API routes
+  const { createStateRouter } = await import("../routes/state.js");
+  const stateRouter = createStateRouter();
+  app.use("/api/state", stateRouter);
+
+  // Mount plugin-registered HTTP routes
+  if (pluginRegistry) {
+    const pluginRoutes = getHttpRoutes(pluginRegistry);
+    for (const route of pluginRoutes) {
+      const { method, path: routePath, handler } = route.params;
+      (app as any)[method](routePath, handler);
+      gatewayLogs.info("Plugins", `Mounted ${method.toUpperCase()} ${routePath} from ${route.pluginId}`);
+    }
+  }
+
+  // Plugin API endpoints
+  app.get(`${config.gateway.httpPath}/plugins`, (_req, res) => {
+    if (!pluginRegistry) {
+      res.json({ ok: true, plugins: [], message: "Plugin system not initialized" });
+      return;
+    }
+    res.json({ ok: true, plugins: pluginRegistry.plugins });
+  });
+
+  app.get(`${config.gateway.httpPath}/plugins/:pluginId`, (req, res) => {
+    if (!pluginRegistry) {
+      sendError(res, "Plugin system not initialized", 503);
+      return;
+    }
+    const plugin = pluginRegistry.plugins.find(p => p.id === req.params.pluginId);
+    if (plugin) {
+      res.json({ ok: true, plugin });
+    } else {
+      sendError(res, "Plugin not found", 404);
+    }
+  });
 
   // Session management endpoints (legacy, kept for backward compatibility)
   app.get(`${config.gateway.httpPath}/sessions`, (_req, res) => {
@@ -485,7 +635,7 @@ export async function createGateway(config: Config): Promise<Gateway> {
       if (approved) {
         res.json({ ok: true, message: "Session approved" });
       } else {
-        res.status(400).json({ ok: false, error: "Invalid session or code" });
+        sendError(res, "Invalid session or code", 400);
       }
     }
   );
@@ -499,7 +649,7 @@ export async function createGateway(config: Config): Promise<Gateway> {
       gatewayLogs.info("Sessions", `Session removed: ${decodedId}`);
       res.json({ ok: true, message: "Session removed" });
     } else {
-      res.status(404).json({ ok: false, error: "Session not found" });
+      sendError(res, "Session not found", 404);
     }
   });
 
@@ -524,7 +674,7 @@ export async function createGateway(config: Config): Promise<Gateway> {
       const skills = await skillsManager.getAllSkills();
       res.json({ ok: true, skills });
     } catch (err) {
-      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      sendError(res, err instanceof Error ? err.message : String(err));
     }
   });
 
@@ -534,7 +684,7 @@ export async function createGateway(config: Config): Promise<Gateway> {
       const categories = await skillsManager.getCategories();
       res.json({ ok: true, categories });
     } catch (err) {
-      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      sendError(res, err instanceof Error ? err.message : String(err));
     }
   });
 
@@ -545,10 +695,10 @@ export async function createGateway(config: Config): Promise<Gateway> {
       if (skill) {
         res.json({ ok: true, skill });
       } else {
-        res.status(404).json({ ok: false, error: "Skill not found" });
+        sendError(res, "Skill not found", 404);
       }
     } catch (err) {
-      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      sendError(res, err instanceof Error ? err.message : String(err));
     }
   });
 
@@ -559,10 +709,10 @@ export async function createGateway(config: Config): Promise<Gateway> {
       if (content) {
         res.json({ ok: true, content });
       } else {
-        res.status(404).json({ ok: false, error: "Skill not found" });
+        sendError(res, "Skill not found", 404);
       }
     } catch (err) {
-      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      sendError(res, err instanceof Error ? err.message : String(err));
     }
   });
 
@@ -604,7 +754,7 @@ export async function createGateway(config: Config): Promise<Gateway> {
       });
       res.json({ ok: true, result });
     } catch (err) {
-      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      sendError(res, err instanceof Error ? err.message : String(err));
     }
   });
 
@@ -655,7 +805,7 @@ export async function createGateway(config: Config): Promise<Gateway> {
       res.json({ ok: true, message: "TUI launched" });
     } catch (err) {
       gatewayLogs.error("ControlPanel", `Failed to launch TUI: ${err instanceof Error ? err.message : String(err)}`);
-      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      sendError(res, err instanceof Error ? err.message : String(err));
     }
   });
 
@@ -678,10 +828,10 @@ export async function createGateway(config: Config): Promise<Gateway> {
     children?: FileEntry[];
   }
 
-  const listFilesRecursive = (dirPath: string, basePath: string = ""): FileEntry[] => {
+  const listFilesRecursive = async (dirPath: string, basePath: string = ""): Promise<FileEntry[]> => {
     const entries: FileEntry[] = [];
     try {
-      const items = fs.readdirSync(dirPath, { withFileTypes: true });
+      const items = await fsp.readdir(dirPath, { withFileTypes: true });
       for (const item of items) {
         const relativePath = basePath ? `${basePath}/${item.name}` : item.name;
         const fullPath = path.join(dirPath, item.name);
@@ -691,10 +841,10 @@ export async function createGateway(config: Config): Promise<Gateway> {
             name: item.name,
             path: relativePath,
             type: "directory",
-            children: listFilesRecursive(fullPath, relativePath),
+            children: await listFilesRecursive(fullPath, relativePath),
           });
         } else if (item.isFile()) {
-          const stats = fs.statSync(fullPath);
+          const stats = await fsp.stat(fullPath);
           entries.push({
             name: item.name,
             path: relativePath,
@@ -710,111 +860,83 @@ export async function createGateway(config: Config): Promise<Gateway> {
   };
 
   // List all files in workspace
-  app.get(`${config.gateway.httpPath}/workspace/files`, (_req, res) => {
+  app.get(`${config.gateway.httpPath}/workspace/files`, async (_req, res) => {
     try {
       const workspacePath = getWorkspacePath();
 
       // Ensure workspace exists
-      if (!fs.existsSync(workspacePath)) {
-        fs.mkdirSync(workspacePath, { recursive: true });
-      }
+      await fsp.mkdir(workspacePath, { recursive: true });
 
-      const files = listFilesRecursive(workspacePath);
-      res.json({ ok: true, files, workspacePath });
+      const files = await listFilesRecursive(workspacePath);
+      sendSuccess(res, { files, workspacePath });
     } catch (err) {
       gatewayLogs.error("Workspace", `Failed to list workspace: ${err}`);
-      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      sendError(res, err instanceof Error ? err.message : String(err));
     }
   });
 
   // Read file content
-  app.get(`${config.gateway.httpPath}/workspace/file`, (req, res) => {
+  app.get(`${config.gateway.httpPath}/workspace/file`, async (req, res) => {
     try {
       const filePath = req.query.path as string;
-      if (!filePath) {
-        res.status(400).json({ ok: false, error: "Missing path parameter" });
-        return;
-      }
-
-      // Security: prevent path traversal
-      if (filePath.includes("..") || path.isAbsolute(filePath)) {
-        res.status(400).json({ ok: false, error: "Invalid path" });
-        return;
-      }
-
       const workspacePath = getWorkspacePath();
-      const fullPath = path.join(workspacePath, filePath);
-
-      // Verify the file is within workspace
-      if (!fullPath.startsWith(workspacePath)) {
-        res.status(400).json({ ok: false, error: "Path outside workspace" });
+      const validation = validateWorkspacePath(workspacePath, filePath);
+      if (!validation.ok) {
+        sendError(res, validation.error!, validation.status!);
         return;
       }
 
-      if (!fs.existsSync(fullPath)) {
-        res.status(404).json({ ok: false, error: "File not found" });
-        return;
-      }
+      try {
+        const stats = await fsp.stat(validation.fullPath);
+        if (stats.isDirectory()) {
+          sendError(res, "Cannot read directory", 400);
+          return;
+        }
 
-      const stats = fs.statSync(fullPath);
-      if (stats.isDirectory()) {
-        res.status(400).json({ ok: false, error: "Cannot read directory" });
-        return;
-      }
+        // Check file size (limit to 1MB for preview)
+        if (stats.size > 1024 * 1024) {
+          sendSuccess(res, {
+            content: null,
+            truncated: true,
+            size: stats.size,
+            message: "File too large to preview (>1MB)"
+          });
+          return;
+        }
 
-      // Check file size (limit to 1MB for preview)
-      if (stats.size > 1024 * 1024) {
-        res.json({
-          ok: true,
-          content: null,
-          truncated: true,
-          size: stats.size,
-          message: "File too large to preview (>1MB)"
-        });
-        return;
+        const content = await fsp.readFile(validation.fullPath, "utf-8");
+        sendSuccess(res, { content, size: stats.size });
+      } catch {
+        sendError(res, "File not found", 404);
       }
-
-      const content = fs.readFileSync(fullPath, "utf-8");
-      res.json({ ok: true, content, size: stats.size });
     } catch (err) {
       gatewayLogs.error("Workspace", `Failed to read file: ${err}`);
-      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      sendError(res, err instanceof Error ? err.message : String(err));
     }
   });
 
   // Download file
-  app.get(`${config.gateway.httpPath}/workspace/download`, (req, res) => {
+  app.get(`${config.gateway.httpPath}/workspace/download`, async (req, res) => {
     try {
       const filePath = req.query.path as string;
-      if (!filePath) {
-        res.status(400).json({ ok: false, error: "Missing path parameter" });
-        return;
-      }
-
-      // Security: prevent path traversal
-      if (filePath.includes("..") || path.isAbsolute(filePath)) {
-        res.status(400).json({ ok: false, error: "Invalid path" });
-        return;
-      }
-
       const workspacePath = getWorkspacePath();
-      const fullPath = path.join(workspacePath, filePath);
-
-      // Verify the file is within workspace
-      if (!fullPath.startsWith(workspacePath)) {
-        res.status(400).json({ ok: false, error: "Path outside workspace" });
+      const validation = validateWorkspacePath(workspacePath, filePath);
+      if (!validation.ok) {
+        sendError(res, validation.error!, validation.status!);
         return;
       }
 
-      if (!fs.existsSync(fullPath)) {
-        res.status(404).json({ ok: false, error: "File not found" });
+      try {
+        await fsp.access(validation.fullPath);
+      } catch {
+        sendError(res, "File not found", 404);
         return;
       }
 
-      res.download(fullPath);
+      res.download(validation.fullPath);
     } catch (err) {
       gatewayLogs.error("Workspace", `Failed to download file: ${err}`);
-      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      sendError(res, err instanceof Error ? err.message : String(err));
     }
   });
 
@@ -851,16 +973,17 @@ export async function createGateway(config: Config): Promise<Gateway> {
     openrouter: {
       name: "OpenRouter",
       models: [
-        { id: "anthropic/claude-sonnet-4", name: "Claude Sonnet 4" },
-        { id: "anthropic/claude-3.5-sonnet", name: "Claude 3.5 Sonnet" },
-        { id: "anthropic/claude-3-opus", name: "Claude 3 Opus" },
-        { id: "openai/gpt-4o", name: "GPT-4o" },
-        { id: "openai/gpt-4-turbo", name: "GPT-4 Turbo" },
-        { id: "google/gemini-pro-1.5", name: "Gemini Pro 1.5" },
-        { id: "deepseek/deepseek-chat", name: "DeepSeek Chat" },
-        { id: "moonshotai/kimi-k2-thinking", name: "Kimi K2 Thinking" },
+        { id: "anthropic/claude-opus-4.5", name: "Claude Opus 4.5" },
+        { id: "anthropic/claude-sonnet-4.5", name: "Claude Sonnet 4.5" },
+        { id: "anthropic/claude-haiku-4.5", name: "Claude Haiku 4.5" },
+        { id: "deepseek/deepseek-v3.2-speciale", name: "DeepSeek V3.2 Speciale" },
+        { id: "deepseek/deepseek-v3.2", name: "DeepSeek V3.2" },
+        { id: "z-ai/glm-4.7-flash", name: "GLM 4.7 Flash" },
+        { id: "z-ai/glm-4.7", name: "GLM 4.7" },
+        { id: "x-ai/grok-4.1-fast", name: "Grok 4.1 Fast" },
+        { id: "x-ai/grok-code-fast-1", name: "Grok Code Fast 1" },
         { id: "moonshotai/kimi-k2.5", name: "Kimi K2.5" },
-        { id: "meta-llama/llama-3.1-405b-instruct", name: "Llama 3.1 405B" },
+        { id: "moonshotai/kimi-k2-thinking", name: "Kimi K2 Thinking" },
       ],
     },
     kimi: {
@@ -924,7 +1047,7 @@ export async function createGateway(config: Config): Promise<Gateway> {
       });
     } catch (err) {
       gatewayLogs.error("Model", `Failed to get model config: ${err}`);
-      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      sendError(res, err instanceof Error ? err.message : String(err));
     }
   });
 
@@ -934,13 +1057,13 @@ export async function createGateway(config: Config): Promise<Gateway> {
       const { provider, model } = req.body;
 
       if (!provider || !model) {
-        res.status(400).json({ ok: false, error: "Missing provider or model" });
+        sendError(res, "Missing provider or model", 400);
         return;
       }
 
       // Validate provider
       if (!MODEL_OPTIONS[provider as keyof typeof MODEL_OPTIONS]) {
-        res.status(400).json({ ok: false, error: "Invalid provider" });
+        sendError(res, "Invalid provider", 400);
         return;
       }
 
@@ -971,7 +1094,7 @@ export async function createGateway(config: Config): Promise<Gateway> {
       res.json({ ok: true, message: "Model configuration updated. Restart agent to apply." });
     } catch (err) {
       gatewayLogs.error("Model", `Failed to update model config: ${err}`);
-      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      sendError(res, err instanceof Error ? err.message : String(err));
     }
   });
 
@@ -1007,7 +1130,7 @@ export async function createGateway(config: Config): Promise<Gateway> {
       res.json({ ok: true, message: "Agent worker restart initiated. A new terminal window should open." });
     } catch (err) {
       gatewayLogs.error("Agent", `Failed to restart agent: ${err instanceof Error ? err.message : String(err)}`);
-      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      sendError(res, err instanceof Error ? err.message : String(err));
     }
   });
 
@@ -1034,7 +1157,7 @@ export async function createGateway(config: Config): Promise<Gateway> {
         res.json({ ok: true, status: "offline", message: "Agent not responding" });
       }
     } catch (err) {
-      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      sendError(res, err instanceof Error ? err.message : String(err));
     }
   });
 
@@ -1094,7 +1217,7 @@ export async function createGateway(config: Config): Promise<Gateway> {
       res.json({ ok: true, files, basePath: userDataPath });
     } catch (err) {
       gatewayLogs.error("Memory", `Failed to list files: ${err}`);
-      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      sendError(res, err instanceof Error ? err.message : String(err));
     }
   });
 
@@ -1103,7 +1226,7 @@ export async function createGateway(config: Config): Promise<Gateway> {
     try {
       const { path: filePath } = req.query;
       if (!filePath || typeof filePath !== "string") {
-        res.status(400).json({ ok: false, error: "Missing path parameter" });
+        sendError(res, "Missing path parameter", 400);
         return;
       }
 
@@ -1113,12 +1236,12 @@ export async function createGateway(config: Config): Promise<Gateway> {
       // Security: prevent path traversal
       const normalizedPath = path.normalize(fullPath);
       if (!normalizedPath.startsWith(userDataPath)) {
-        res.status(403).json({ ok: false, error: "Path traversal not allowed" });
+        sendError(res, "Path traversal not allowed", 403);
         return;
       }
 
       if (!fs.existsSync(fullPath)) {
-        res.status(404).json({ ok: false, error: "File not found" });
+        sendError(res, "File not found", 404);
         return;
       }
 
@@ -1134,7 +1257,7 @@ export async function createGateway(config: Config): Promise<Gateway> {
       });
     } catch (err) {
       gatewayLogs.error("Memory", `Failed to read file: ${err}`);
-      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      sendError(res, err instanceof Error ? err.message : String(err));
     }
   });
 
@@ -1143,11 +1266,11 @@ export async function createGateway(config: Config): Promise<Gateway> {
     try {
       const { path: filePath, content } = req.body;
       if (!filePath || typeof filePath !== "string") {
-        res.status(400).json({ ok: false, error: "Missing path parameter" });
+        sendError(res, "Missing path parameter", 400);
         return;
       }
       if (content === undefined || typeof content !== "string") {
-        res.status(400).json({ ok: false, error: "Missing content parameter" });
+        sendError(res, "Missing content parameter", 400);
         return;
       }
 
@@ -1157,7 +1280,7 @@ export async function createGateway(config: Config): Promise<Gateway> {
       // Security: prevent path traversal
       const normalizedPath = path.normalize(fullPath);
       if (!normalizedPath.startsWith(userDataPath)) {
-        res.status(403).json({ ok: false, error: "Path traversal not allowed" });
+        sendError(res, "Path traversal not allowed", 403);
         return;
       }
 
@@ -1173,7 +1296,7 @@ export async function createGateway(config: Config): Promise<Gateway> {
       res.json({ ok: true, message: "File saved successfully" });
     } catch (err) {
       gatewayLogs.error("Memory", `Failed to save file: ${err}`);
-      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      sendError(res, err instanceof Error ? err.message : String(err));
     }
   });
 
@@ -1182,7 +1305,7 @@ export async function createGateway(config: Config): Promise<Gateway> {
     try {
       const { filename, type } = req.body;
       if (!filename || typeof filename !== "string") {
-        res.status(400).json({ ok: false, error: "Missing filename parameter" });
+        sendError(res, "Missing filename parameter", 400);
         return;
       }
 
@@ -1199,12 +1322,12 @@ export async function createGateway(config: Config): Promise<Gateway> {
       // Security check
       const normalizedPath = path.normalize(filePath);
       if (!normalizedPath.startsWith(userDataPath)) {
-        res.status(403).json({ ok: false, error: "Path traversal not allowed" });
+        sendError(res, "Path traversal not allowed", 403);
         return;
       }
 
       if (fs.existsSync(filePath)) {
-        res.status(400).json({ ok: false, error: "File already exists" });
+        sendError(res, "File already exists", 400);
         return;
       }
 
@@ -1218,7 +1341,7 @@ export async function createGateway(config: Config): Promise<Gateway> {
       res.json({ ok: true, path: type === "log" ? `memory/${filename}` : filename });
     } catch (err) {
       gatewayLogs.error("Memory", `Failed to create file: ${err}`);
-      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      sendError(res, err instanceof Error ? err.message : String(err));
     }
   });
 
@@ -1236,7 +1359,7 @@ export async function createGateway(config: Config): Promise<Gateway> {
   // Simple HTTP chat endpoint for CLI channel
   // POST /api/chat { text: string, session_id?: string }
   // Returns { ok: boolean, text: string, session_id: string, events: array }
-  app.post(`${config.gateway.httpPath}/chat`, async (req, res) => {
+  app.post(`${config.gateway.httpPath}/chat`, createChatRateLimitMiddleware(), async (req, res) => {
     try {
       const { text, session_id, metadata } = req.body;
 
@@ -1259,6 +1382,117 @@ export async function createGateway(config: Config): Promise<Gateway> {
         ok: false,
         error: err instanceof Error ? err.message : String(err),
       });
+    }
+  });
+
+  // Streaming chat endpoint for TUI
+  // POST /api/chat/stream { text: string, session_id?: string }
+  // Returns SSE stream with events: chunk, tool_start, tool_end, complete, error
+  app.post(`${config.gateway.httpPath}/chat/stream`, createChatRateLimitMiddleware(), async (req, res) => {
+    const { text, session_id, metadata } = req.body;
+    const sessionId = session_id || crypto.randomUUID();
+
+    if (!text || typeof text !== "string") {
+      res.status(400).json({ ok: false, error: "Missing or invalid 'text' field" });
+      return;
+    }
+
+    // Set SSE headers
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders();
+
+    // Helper to send SSE event
+    const sendEvent = (data: Record<string, unknown>) => {
+      try {
+        res.write(`data: ${JSON.stringify(data)}\n\n`);
+      } catch {
+        // Client disconnected
+      }
+    };
+
+    // Subscribe to tool events for this session
+    const onToolEvent = (event: ToolEvent) => {
+      if (event.event_type === "tool_start") {
+        sendEvent({
+          type: "tool_start",
+          tool_name: event.tool_name,
+          tool_call_id: event.tool_call_id,
+          tool_args: event.args,
+        });
+      } else if (event.event_type === "tool_end") {
+        sendEvent({
+          type: "tool_end",
+          tool_name: event.tool_name,
+          tool_call_id: event.tool_call_id,
+          preview: event.preview,
+          duration_ms: event.duration_ms,
+        });
+      } else if (event.event_type === "tool_error") {
+        sendEvent({
+          type: "tool_error",
+          tool_name: event.tool_name,
+          tool_call_id: event.tool_call_id,
+          error: event.error,
+        });
+      }
+    };
+
+    toolEventBus.on(`session:${sessionId}`, onToolEvent);
+
+    // Cleanup on disconnect
+    req.on("close", () => {
+      toolEventBus.off(`session:${sessionId}`, onToolEvent);
+    });
+
+    try {
+      // Send initial connected event
+      sendEvent({ type: "connected", session_id: sessionId });
+
+      const result = await router.handleWsMessage({
+        text,
+        session_id: sessionId,
+        metadata,
+      });
+
+      if (!result.ok) {
+        sendEvent({
+          type: "error",
+          error: result.error || "Unknown error",
+          session_id: sessionId,
+        });
+      } else {
+        // Send the response as a single chunk (agent returns full response)
+        if (result.text) {
+          sendEvent({
+            type: "chunk",
+            content: result.text,
+            session_id: sessionId,
+          });
+        }
+
+        // Send complete event with metadata
+        sendEvent({
+          type: "complete",
+          session_id: sessionId,
+          events: result.events || [],
+          approvalPending: result.approvalPending,
+          pairingRequired: result.pairingRequired,
+          pairingCode: result.pairingCode,
+        });
+      }
+    } catch (err) {
+      sendEvent({
+        type: "error",
+        error: err instanceof Error ? err.message : String(err),
+        session_id: sessionId,
+      });
+    } finally {
+      // Cleanup and close
+      toolEventBus.off(`session:${sessionId}`, onToolEvent);
+      res.end();
     }
   });
 
@@ -1388,6 +1622,23 @@ export async function createGateway(config: Config): Promise<Gateway> {
       // Start the scheduler
       scheduler.start();
 
+      // Start plugin services
+      if (pluginRegistry) {
+        const serviceContext = {
+          config,
+          workspaceDir: projectRoot,
+          stateDir: path.join(os.homedir(), '.ag3nt', 'plugin-state'),
+          logger: console as any,
+        };
+        await startServices(pluginRegistry, serviceContext);
+
+        // Execute gateway_start hooks
+        await executeHooks(pluginRegistry, 'gateway_start', { config, port: config.gateway.port }, {
+          logger: console as any,
+          config,
+        });
+      }
+
       await new Promise<void>((resolve) => {
         server.listen(config.gateway.port, config.gateway.host, () => {
           console.log(
@@ -1398,14 +1649,37 @@ export async function createGateway(config: Config): Promise<Gateway> {
       });
     },
     stop: async () => {
+      // Execute gateway_stop hooks
+      if (pluginRegistry) {
+        await executeHooks(pluginRegistry, 'gateway_stop', { reason: 'shutdown' }, {
+          logger: console as any,
+          config,
+        });
+
+        // Stop plugin services
+        const serviceContext = {
+          config,
+          workspaceDir: projectRoot,
+          stateDir: path.join(os.homedir(), '.ag3nt', 'plugin-state'),
+          logger: console as any,
+        };
+        await stopServices(pluginRegistry, serviceContext);
+      }
+
       // Stop the scheduler
       scheduler.stop();
 
       // Stop node connection manager
       nodeConnectionManager.stop();
 
+      // Stop the router (queue manager)
+      router.stop();
+
       // Close message store
       messageStore.close();
+
+      // Close session store
+      sessionStore.close();
 
       // Disconnect all channel adapters
       await channelRegistry.disconnectAll();

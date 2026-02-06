@@ -183,7 +183,12 @@ def perform_string_replacement(
     new_string: str,
     replace_all: bool,
 ) -> tuple[str, int] | str:
-    """Perform string replacement with occurrence validation.
+    """Perform string replacement with cascading fuzzy matching.
+
+    Tries exact match first, then falls back through progressively fuzzier
+    strategies (line-trimmed, whitespace-normalized, indentation-flexible,
+    block-anchor, context-aware) to handle minor formatting differences
+    in LLM-generated edit strings.
 
     Args:
         content: Original content
@@ -194,6 +199,13 @@ def perform_string_replacement(
     Returns:
         Tuple of (new_content, occurrences) on success, or error message string
     """
+    try:
+        from ag3nt_agent.fuzzy_edit import perform_string_replacement as _fuzzy_replace
+        return _fuzzy_replace(content, old_string, new_string, replace_all)
+    except ImportError:
+        # Fallback to exact matching if fuzzy_edit not available
+        pass
+
     occurrences = content.count(old_string)
 
     if occurrences == 0:

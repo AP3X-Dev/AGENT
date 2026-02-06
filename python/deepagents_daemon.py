@@ -273,9 +273,27 @@ def _agent_category(name: str) -> str:
 
 
 @dataclass
-class PendingApproval:
+class PendingInterrupt:
     interrupt_id: str
     action_requests: list[dict[str, Any]]
+
+
+@dataclass
+class PendingApproval:
+    """Stores one or more pending interrupts for a session."""
+    interrupts: list[PendingInterrupt] = field(default_factory=list)
+
+    # Backwards-compat helpers
+    @property
+    def interrupt_id(self) -> str:
+        return self.interrupts[0].interrupt_id if self.interrupts else ""
+
+    @property
+    def action_requests(self) -> list[dict[str, Any]]:
+        reqs: list[dict[str, Any]] = []
+        for i in self.interrupts:
+            reqs.extend(i.action_requests)
+        return reqs
 
 
 @dataclass
@@ -713,7 +731,14 @@ class AgentRuntime:
 
         messages: list[dict[str, Any]] = []
         if ui_context:
-            messages.append({"role": "system", "content": ui_context})
+            # Inject UI context as a preamble in the user message, NOT as a
+            # separate system message.  A system message here would conflict
+            # with the agent's own system_prompt and middleware overrides,
+            # producing "Received multiple non-consecutive system messages."
+            if isinstance(message_content, str):
+                message_content = f"[UI Context]\n{ui_context}\n[/UI Context]\n\n{message_content}"
+            elif isinstance(message_content, list):
+                message_content = [{"type": "text", "text": f"[UI Context]\n{ui_context}\n[/UI Context]\n\n"}] + message_content
         messages.append({"role": "user", "content": message_content})
 
         session.messages.append(
@@ -755,9 +780,6 @@ class AgentRuntime:
         session.assistant_id = assistant_id
 
         pending = self._pending_approvals.get(thread_id)
-        action_reqs: list[dict[str, Any]] = []
-        if pending and pending.action_requests:
-            action_reqs = pending.action_requests
 
         if decision == "auto_approve_all":
             session.auto_approve = True
@@ -765,8 +787,15 @@ class AgentRuntime:
         else:
             decision_type = str(decision)
 
-        decisions = [{"type": decision_type} for _ in action_reqs] or [{"type": decision_type}]
-        stream_input: Command = Command(resume={"decisions": decisions})
+        # Build resume Commands — one per pending interrupt with its ID
+        if pending and pending.interrupts:
+            commands: list[Command] = []
+            for pi in pending.interrupts:
+                decs = [{"type": decision_type} for _ in pi.action_requests] or [{"type": decision_type}]
+                commands.append(Command(resume={"decisions": decs}, id=pi.interrupt_id))
+            stream_input: Command | list[Command] = commands if len(commands) > 1 else commands[0]
+        else:
+            stream_input = Command(resume={"decisions": [{"type": decision_type}]})
 
         agent = self._get_agent(model_name=session.model_name)
         config = self._build_config(thread_id=thread_id, assistant_id=assistant_id)
@@ -798,7 +827,7 @@ class AgentRuntime:
         agent: Any,
         config: dict[str, Any],
         session: SessionState,
-        stream_input: dict[str, Any] | Command,
+        stream_input: dict[str, Any] | Command | list[Command],
     ) -> AsyncIterator[dict[str, Any]]:
         yield {"type": "status", "status": "thinking", "message": "Agent is thinking..."}
         yield {"type": "thread_id", "thread_id": session.thread_id}
@@ -961,24 +990,29 @@ class AgentRuntime:
                             tool_call_buffers.pop(key, None)
 
             if interrupt_values:
-                # Store the first interrupt's action_requests for resume.
-                # DeepAgents v0.3.8 resume uses a single decisions list.
-                # We still send interrupt_id to the UI for display/compat.
-                interrupt_id, payload = interrupt_values[0]
-                action_reqs = payload.get("action_requests", []) if isinstance(payload, dict) else []
-                if not isinstance(action_reqs, list):
-                    action_reqs = []
+                # Store ALL pending interrupts for resume.
+                pending_interrupts: list[PendingInterrupt] = []
+                approvals_payload: list[dict[str, Any]] = []
+                for iid, payload in interrupt_values:
+                    action_reqs = payload.get("action_requests", []) if isinstance(payload, dict) else []
+                    if not isinstance(action_reqs, list):
+                        action_reqs = []
+                    pending_interrupts.append(PendingInterrupt(interrupt_id=iid, action_requests=action_reqs))
+                    approvals_payload.append({"interrupt_id": iid, "action_requests": action_reqs})
+
                 self._pending_approvals[session.thread_id] = PendingApproval(
-                    interrupt_id=interrupt_id,
-                    action_requests=action_reqs,
+                    interrupts=pending_interrupts,
                 )
 
                 if session.auto_approve:
-                    decisions = [{"type": "approve"} for _ in action_reqs] or [{"type": "approve"}]
-                    stream_input = Command(resume={"decisions": decisions})
+                    # Resume ALL interrupts at once, each tagged with its ID
+                    commands: list[Command] = []
+                    for pi in pending_interrupts:
+                        decs = [{"type": "approve"} for _ in pi.action_requests] or [{"type": "approve"}]
+                        commands.append(Command(resume={"decisions": decs}, id=pi.interrupt_id))
+                    stream_input = commands if len(commands) > 1 else commands[0]
                     continue
 
-                approvals_payload = [{"interrupt_id": interrupt_id, "action_requests": action_reqs}]
                 yield {"type": "approval_required", "approvals": approvals_payload, "auto_approve": session.auto_approve}
                 yield {"type": "done", "approval_required": True, "auto_approve": session.auto_approve}
                 return

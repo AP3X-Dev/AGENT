@@ -237,7 +237,7 @@ def create_deep_agent(
             default_tools=tools,
             subagents=subagents if subagents is not None else [],
             default_middleware=subagent_middleware,
-            default_interrupt_on=interrupt_on,
+            default_interrupt_on=None,  # Subagents run without HITL interrupts (no checkpointer)
             general_purpose_agent=True,
         )
     )

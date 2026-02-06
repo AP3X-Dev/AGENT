@@ -1,0 +1,75 @@
+# ─────────────────────────────────────────────────────────────────
+# AG3NT — Docker Compose deployment
+# ─────────────────────────────────────────────────────────────────
+# Usage:
+#   docker compose up -d          # Start all services
+#   docker compose logs -f        # Follow logs
+#   docker compose down           # Stop all
+#   docker compose up --build     # Rebuild and start
+# ─────────────────────────────────────────────────────────────────
+
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: apps/gateway/Dockerfile
+    container_name: ag3nt-gateway
+    ports:
+      - "${AG3NT_GATEWAY_PORT:-18789}:18789"
+    environment:
+      - NODE_ENV=production
+      - AG3NT_GATEWAY_HOST=0.0.0.0
+      - AG3NT_GATEWAY_PORT=18789
+      - AG3NT_AGENT_URL=http://agent:18790
+    env_file:
+      - .env
+    volumes:
+      - ag3nt-data:/home/ag3nt/.ag3nt
+      - ./config:/app/config:ro
+      - ./skills:/app/skills:ro
+    depends_on:
+      agent:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:18789/api/health').then(r=>{if(!r.ok)throw 1}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - ag3nt-net
+
+  agent:
+    build:
+      context: .
+      dockerfile: apps/agent/Dockerfile
+    container_name: ag3nt-agent
+    ports:
+      - "${AG3NT_AGENT_PORT:-18790}:18790"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - AG3NT_AGENT_HOST=0.0.0.0
+      - AG3NT_AGENT_PORT=18790
+    env_file:
+      - .env
+    volumes:
+      - ag3nt-data:/home/ag3nt/.ag3nt
+      - ./workspace:/home/ag3nt/.ag3nt/workspace
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:18790/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - ag3nt-net
+
+volumes:
+  ag3nt-data:
+    driver: local
+
+networks:
+  ag3nt-net:
+    driver: bridge

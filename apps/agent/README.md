@@ -13,7 +13,7 @@ The agent worker supports multiple LLM providers through environment variables:
 #### OpenRouter (Default)
 ```bash
 export AG3NT_MODEL_PROVIDER=openrouter
-export AG3NT_MODEL_NAME=moonshotai/kimi-k2-thinking
+export AG3NT_MODEL_NAME=moonshotai/kimi-k2.5
 export OPENROUTER_API_KEY=your_key_here
 ```
 
@@ -29,15 +29,15 @@ OpenRouter provides access to multiple models through a unified API:
 
 ```bash
 export AG3NT_MODEL_PROVIDER=openrouter
-export AG3NT_MODEL_NAME=moonshotai/kimi-k2-thinking  # or moonshotai/kimi-k2.5, openai/gpt-4o, etc.
+export AG3NT_MODEL_NAME=moonshotai/kimi-k2.5  # or deepseek/deepseek-chat-v3-0324, openai/gpt-4o, etc.
 export OPENROUTER_API_KEY=your_key_here
 ```
 
 Get your OpenRouter API key from: https://openrouter.ai/keys
 
 Popular OpenRouter models:
+- `moonshotai/kimi-k2.5` (default)
 - `moonshotai/kimi-k2-thinking`
-- `moonshotai/kimi-k2.5`
 - `anthropic/claude-3.5-sonnet`
 - `anthropic/claude-3-opus`
 - `openai/gpt-4o`
